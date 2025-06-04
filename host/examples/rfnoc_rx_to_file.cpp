@@ -369,6 +369,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             last_port_in_chain  = edges.back().src_port;
         }
     }
+
+    std::cout << "Here is the source port ID:" << last_block_in_chain << " and heres its port number: " << last_port_in_chain << std::endl;
     /************************************************************************
      * Set up radio
      ***********************************************************************/
