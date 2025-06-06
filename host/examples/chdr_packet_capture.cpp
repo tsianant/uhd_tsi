@@ -171,7 +171,8 @@ void capture_chdr_packets(
     bool enable_analysis,
     const std::string& csv_file,
     size_t chdr_width_bits,
-    double rate)
+    double rate,
+    size_t samps_per_buff)
 {
     // Open binary file for writing
     std::ofstream outfile(file.c_str(), std::ios::binary);
@@ -190,8 +191,8 @@ void capture_chdr_packets(
     const size_t chdr_width_bytes = chdr_width_bits / 8;
     
     // Buffer for raw packet data
-    std::vector<uint8_t> packet_buffer;
-    packet_buffer.reserve(max_samps_per_packet * sizeof(samp_type) + 1024);
+    std::vector<samp_type> packet_buffer(samps_per_buff * sizeof(samp_type));
+    // packet_buffer.reserve(max_samps_per_packet * sizeof(samp_type) + 1024);
     
     // Metadata
     uhd::rx_metadata_t md;
@@ -201,7 +202,7 @@ void capture_chdr_packets(
         uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS :
         uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE);
     
-    stream_cmd.num_samps = num_packets * max_samps_per_packet;
+    stream_cmd.num_samps = num_packets * 5;
     stream_cmd.stream_now = (time_requested == 0.0);
     if (!stream_cmd.stream_now) {
         stream_cmd.time_spec = uhd::time_spec_t(time_requested);
@@ -486,7 +487,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     // Variables for program options
     std::string args, file, format, csv_file, block_id;
     size_t radio_id, radio_chan, block_port;
-    size_t num_packets, chdr_width;
+    size_t num_packets, chdr_width, spp, spb;
     double rate, freq, gain, bw, time_requested;
     bool analyze_only = false;
     bool show_graph = false;
@@ -512,6 +513,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("chdr-width", po::value<size_t>(&chdr_width)->default_value(64), "CHDR width in bits")
         ("time", po::value<double>(&time_requested)->default_value(0.0), "time to start capture")
         ("show-graph", po::value<bool>(&show_graph)->default_value(false), "print RFNoC graph info")
+        ("spp", po::value<size_t>(&spp), "samples per packet (on FPGA and wire)")
+        ("spb", po::value<size_t>(&spb)->default_value(10000), "samples per buffer")
     ;
     
     po::variables_map vm;
@@ -562,17 +565,58 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     
     // Configure radio
     std::cout << "Using radio " << radio_id << ", channel " << radio_chan << std::endl;
+
+    // Wait for lo_locked before setting frequency (similar to working example)
+    std::cout << "Waiting for \"lo_locked\": " << std::flush;
+    while (not radio_ctrl->get_rx_sensor("lo_locked", radio_chan).to_bool()) {
+        std::this_thread::sleep_for(50ms);
+        std::cout << "+" << std::flush;
+    }
+    std::cout << " locked." << std::endl;
+
     radio_ctrl->set_rx_frequency(freq, radio_chan);
     radio_ctrl->set_rx_gain(gain, radio_chan);
     if (bw > 0) {
         radio_ctrl->set_rx_bandwidth(bw, radio_chan);
     }
     
+    bool user_block_found = false;
     // Find the RX path from radio to SEP
     uhd::rfnoc::block_id_t last_block_id = radio_ctrl_id;
     size_t last_port = radio_chan;
     
-    // Check if user specified a block to insert
+    uhd::rfnoc::block_id_t last_block_in_chain;
+    size_t last_port_in_chain;
+    { // First, connect everything dangling off of the radio
+        auto edges = uhd::rfnoc::get_block_chain(graph, radio_ctrl_id, radio_chan, true);
+        last_block_in_chain = edges.back().src_blockid;
+        last_port_in_chain  = edges.back().src_port;
+        if (edges.size() > 1) {
+            uhd::rfnoc::connect_through_blocks(graph,
+                radio_ctrl_id,
+                radio_chan,
+                last_block_in_chain,
+                last_port_in_chain);
+            for (auto& edge : edges) {
+                // if (uhd::rfnoc::block_id_t(edge.dst_blockid).get_block_name() == "DDC") {
+                //     ddc_ctrl =
+                //         graph->get_block<uhd::rfnoc::ddc_block_control>(edge.dst_blockid);
+                //     ddc_chan = edge.dst_port;
+                // }
+                if (vm.count("block-id") && edge.dst_blockid == block_id) {
+                    user_block_found = true;
+                }
+            }
+        }
+    }
+
+
+    last_block_id = last_block_in_chain;
+    last_port = last_port_in_chain;
+
+    /*
+    //Check if user specified a block to insert
+    //TODO: Fix this please, similar to the above logic
     if (!block_id.empty()) {
         if (graph->has_block(block_id)) {
             std::cout << "Inserting user block: " << block_id << std::endl;
@@ -602,16 +646,28 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             std::cerr << "Warning: Block " << block_id << " not found" << std::endl;
         }
     }
-    
+    */
+
     // Find the edge that connects to SEP
     auto last_edge = find_rx_edge_to_sep(graph, last_block_id, last_port);
     last_block_id = uhd::rfnoc::block_id_t(last_edge.src_blockid);
 
     last_port = last_edge.src_port;
+
+
+    if (vm.count("spp")) {
+        std::cout << "Requesting samples per packet of: " << spp << std::endl;
+        radio_ctrl->set_property<int>("spp", spp, radio_chan);
+        spp = radio_ctrl->get_property<int>("spp", radio_chan);
+        std::cout << "Actual samples per packet = " << spp << std::endl;
+    }
+
+    
     
     // Create RX streamer
     uhd::stream_args_t stream_args(format, "sc16");
     stream_args.channels = {0};  // Single channel streamer
+    
     
     std::cout << "Creating RX streamer..." << std::endl;
     auto rx_stream = graph->create_rx_streamer(1, stream_args);
@@ -665,17 +721,17 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     bool enable_analysis = !csv_file.empty();
     
     if (format == "sc16") {
-        capture_chdr_packets<std::complex<int16_t>>(
+        capture_chdr_packets<std::complex<short>>(
             rx_stream, file, num_packets, time_requested, 
-            enable_analysis, csv_file, chdr_width, rate);
+            enable_analysis, csv_file, chdr_width, rate, spb);
     } else if (format == "fc32") {
         capture_chdr_packets<std::complex<float>>(
             rx_stream, file, num_packets, time_requested,
-            enable_analysis, csv_file, chdr_width, rate);
+            enable_analysis, csv_file, chdr_width, rate, spb);
     } else if (format == "fc64") {
         capture_chdr_packets<std::complex<double>>(
             rx_stream, file, num_packets, time_requested,
-            enable_analysis, csv_file, chdr_width, rate);
+            enable_analysis, csv_file, chdr_width, rate, spb);
     } else {
         throw std::runtime_error("Unsupported format: " + format);
     }
