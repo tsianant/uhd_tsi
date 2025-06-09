@@ -161,7 +161,7 @@ uhd::rfnoc::graph_edge_t find_rx_edge_to_sep(
     return last_edge;
 }
 
-// Raw CHDR packet capture function
+// Fixed capture_chdr_packets function with proper SPP/SPB configuration
 template <typename samp_type>
 void capture_chdr_packets(
     uhd::rx_streamer::sptr rx_stream,
@@ -186,139 +186,169 @@ void capture_chdr_packets(
     file_header[1] = chdr_width_bits;
     outfile.write(reinterpret_cast<const char*>(file_header), sizeof(file_header));
     
-    // Prepare buffers
+    // Get actual streaming parameters from the streamer
     const size_t max_samps_per_packet = rx_stream->get_max_num_samps();
     const size_t chdr_width_bytes = chdr_width_bits / 8;
     
+    // Use the smaller of requested SPB or max samples per packet
+    size_t effective_spb = std::min(samps_per_buff, max_samps_per_packet);
+    
+    std::cout << "Stream configuration:" << std::endl;
+    std::cout << "  Max samples per packet: " << max_samps_per_packet << std::endl;
+    std::cout << "  Requested samples per buffer: " << samps_per_buff << std::endl;  
+    std::cout << "  Effective samples per buffer: " << effective_spb << std::endl;
+    std::cout << "  Sample size: " << sizeof(samp_type) << " bytes" << std::endl;
+    std::cout << "  CHDR width: " << chdr_width_bits << " bits" << std::endl;
+    
     // Buffer for raw packet data
-    std::vector<samp_type> packet_buffer(samps_per_buff * sizeof(samp_type));
-    // packet_buffer.reserve(max_samps_per_packet * sizeof(samp_type) + 1024);
+    std::vector<uint8_t> packet_buffer;
+    packet_buffer.reserve(max_samps_per_packet * sizeof(samp_type) + 64); // Extra space for headers
     
     // Metadata
     uhd::rx_metadata_t md;
     
-    // Setup streaming
+    // Setup streaming with proper sample counts
     uhd::stream_cmd_t stream_cmd(num_packets == 0 ? 
         uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS :
         uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE);
     
-    stream_cmd.num_samps = num_packets * 5;
+    // If capturing specific number of packets, calculate total samples needed
+    if (num_packets > 0) {
+        stream_cmd.num_samps = num_packets * effective_spb;
+        std::cout << "Requesting " << stream_cmd.num_samps << " total samples (" 
+                  << num_packets << " packets * " << effective_spb << " samples/packet)" << std::endl;
+    }
+    
     stream_cmd.stream_now = (time_requested == 0.0);
     if (!stream_cmd.stream_now) {
         stream_cmd.time_spec = uhd::time_spec_t(time_requested);
+        std::cout << "Scheduled start time: " << time_requested << " seconds" << std::endl;
     }
     
     rx_stream->issue_stream_cmd(stream_cmd);
     
     // Packet capture statistics
     size_t packets_captured = 0;
+    size_t total_samples_received = 0;
     size_t total_bytes = 0;
     auto start_time = std::chrono::steady_clock::now();
     
-    std::cout << "Starting CHDR packet capture..." << std::endl;
-    std::cout << "CHDR Width: " << chdr_width_bits << " bits" << std::endl;
-    std::cout << "Max samples per packet: " << max_samps_per_packet << std::endl;
+    std::cout << "\nStarting CHDR packet capture..." << std::endl;
     
     // For analysis
     std::vector<chdr_packet_data> captured_packets;
     
     // Main capture loop
     while (!stop_signal_called && (num_packets == 0 || packets_captured < num_packets)) {
-        // Create buffer vector for recv
-        std::vector<samp_type> buff(max_samps_per_packet);
+        // Create buffer vector for recv - use effective_spb size
+        std::vector<samp_type> buff(effective_spb);
         std::vector<void*> buff_ptrs;
         buff_ptrs.push_back(&buff.front());
         
-        // Receive samples
+        // Receive samples with reasonable timeout
         size_t num_rx_samps = rx_stream->recv(
-            buff_ptrs, max_samps_per_packet, md, 3.0);
+            buff_ptrs, effective_spb, md, 3.0, false);
         
+        // Handle errors
         if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
-            std::cout << "Timeout while streaming" << std::endl;
-            break;
+            std::cout << "\nTimeout while streaming (received " << packets_captured 
+                      << " packets so far)" << std::endl;
+            if (packets_captured == 0) {
+                std::cerr << "No packets received - check configuration!" << std::endl;
+                break;
+            }
+            // Continue for now, might get more packets
+            continue;
         }
         if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW) {
-            std::cerr << "Overflow detected" << std::endl;
+            std::cerr << "O" << std::flush; // Brief overflow indicator
             continue;
         }
         if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
-            std::cerr << "Receiver error: " << md.strerror() << std::endl;
+            std::cerr << "\nReceiver error: " << md.strerror() << std::endl;
             break;
         }
         
-        // Calculate actual packet size (samples + CHDR overhead)
+        // Only process if we actually received samples
+        if (num_rx_samps == 0) {
+            continue;
+        }
+        
+        // Calculate packet sizes
         size_t sample_size_bytes = num_rx_samps * sizeof(samp_type);
-        size_t header_size = (chdr_width_bits / 8);
-        size_t packet_size_bytes = sample_size_bytes + header_size;
+        size_t timestamp_size = md.has_time_spec ? 8 : 0;
+        size_t total_packet_size = 8 + timestamp_size + sample_size_bytes; // header + optional timestamp + data
         
-        // Construct CHDR packet in buffer
+        // Construct CHDR packet
         packet_buffer.clear();
+        packet_buffer.reserve(total_packet_size);
         
-        // Add CHDR header
+        // Create CHDR header
         uint64_t header = 0;
-        header |= (uint64_t)(0) & 0xFFFF;                    // DstEPID (placeholder)
-        header |= ((uint64_t)packet_size_bytes & 0xFFFF) << 16;  // Length
-        header |= ((uint64_t)(packets_captured & 0xFFFF)) << 32; // SeqNum
-        header |= ((uint64_t)0 & 0x1F) << 48;                // NumMData
-        header |= ((uint64_t)(md.has_time_spec ? 0x7 : 0x6) & 0x7) << 53; // PktType
-        header |= ((uint64_t)(md.end_of_burst ? 1 : 0) & 0x1) << 57;  // EOB
-        header |= ((uint64_t)0 & 0x3F) << 58;                // VC
+        header |= (uint64_t)(0x0000) & 0xFFFF;                       // DstEPID (0 for now)
+        header |= ((uint64_t)total_packet_size & 0xFFFF) << 16;      // Length
+        header |= ((uint64_t)(packets_captured & 0xFFFF)) << 32;     // SeqNum
+        header |= ((uint64_t)0 & 0x1F) << 48;                        // NumMData (0 for data packets)
+        header |= ((uint64_t)(md.has_time_spec ? 0x7 : 0x6) & 0x7) << 53; // PktType (0x7=data with TS, 0x6=data no TS)
+        header |= ((uint64_t)(md.end_of_burst ? 1 : 0) & 0x1) << 57; // EOB
+        header |= ((uint64_t)0 & 0x3F) << 58;                        // VC (Virtual Channel)
         
-        // Write header to buffer
-        packet_buffer.resize(8);
-        memcpy(packet_buffer.data(), &header, 8);
+        // Add header to packet buffer
+        const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
+        packet_buffer.insert(packet_buffer.end(), header_bytes, header_bytes + 8);
         
         // Add timestamp if present
         if (md.has_time_spec) {
             uint64_t timestamp = md.time_spec.to_ticks(rate);
-            packet_buffer.resize(packet_buffer.size() + 8);
-            memcpy(packet_buffer.data() + 8, &timestamp, 8);
-            packet_size_bytes += 8;
+            const uint8_t* ts_bytes = reinterpret_cast<const uint8_t*>(&timestamp);
+            packet_buffer.insert(packet_buffer.end(), ts_bytes, ts_bytes + 8);
         }
         
         // Add sample data
-        size_t data_offset = packet_buffer.size();
-        packet_buffer.resize(packet_buffer.size() + sample_size_bytes);
-        memcpy(packet_buffer.data() + data_offset, buff.data(), sample_size_bytes);
+        const uint8_t* sample_bytes = reinterpret_cast<const uint8_t*>(buff.data());
+        packet_buffer.insert(packet_buffer.end(), sample_bytes, sample_bytes + sample_size_bytes);
         
-        // Write packet size followed by packet data
-        uint32_t pkt_size = static_cast<uint32_t>(packet_size_bytes);
+        // Write packet to file: [size][packet_data]
+        uint32_t pkt_size = static_cast<uint32_t>(packet_buffer.size());
         outfile.write(reinterpret_cast<const char*>(&pkt_size), sizeof(pkt_size));
-        outfile.write(reinterpret_cast<const char*>(packet_buffer.data()), packet_size_bytes);
+        outfile.write(reinterpret_cast<const char*>(packet_buffer.data()), packet_buffer.size());
         
         // Store for analysis if requested
-        if (enable_analysis) {
+        if (enable_analysis && captured_packets.size() < 10000) { // Limit memory usage
             chdr_packet_data pkt;
             
-            // Parse based on CHDR width
+            // Parse header
             const uint64_t* data_ptr = reinterpret_cast<const uint64_t*>(packet_buffer.data());
             pkt.header = data_ptr[0];
             
-            if (md.has_time_spec && chdr_width_bits == 64) {
+            // Extract timestamp if present
+            if (md.has_time_spec) {
                 pkt.timestamp = data_ptr[1];
-            } else if (md.has_time_spec && chdr_width_bits > 64) {
-                pkt.timestamp = data_ptr[1]; // Timestamp is in second 64-bit word
             }
             
-            // Store payload
-            size_t header_offset = (chdr_width_bits == 64 && md.has_time_spec) ? 16 : chdr_width_bytes;
-            pkt.payload.assign(packet_buffer.begin() + header_offset, 
-                             packet_buffer.begin() + packet_size_bytes);
+            // Store payload (sample data only)
+            size_t header_offset = 8 + timestamp_size;
+            pkt.payload.assign(packet_buffer.begin() + header_offset, packet_buffer.end());
             
             captured_packets.push_back(pkt);
         }
         
+        // Update statistics
         packets_captured++;
-        total_bytes += packet_size_bytes;
+        total_samples_received += num_rx_samps;
+        total_bytes += packet_buffer.size();
         
-        // Progress update
-        if (packets_captured % 1000 == 0) {
+        // Progress update every 100 packets (not too frequent)
+        if (packets_captured % 100 == 0) {
             auto elapsed = std::chrono::steady_clock::now() - start_time;
-            double rate = total_bytes * 1e9 / 
-                std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
-            std::cout << "\rCaptured " << packets_captured << " packets, "
-                      << total_bytes/1024.0/1024.0 << " MB, "
-                      << rate/1024.0/1024.0 << " MB/s" << std::flush;
+            double elapsed_secs = std::chrono::duration<double>(elapsed).count();
+            double sample_rate = total_samples_received / elapsed_secs;
+            double data_rate = total_bytes / elapsed_secs;
+            
+            std::cout << "\rPackets: " << packets_captured 
+                      << ", Samples: " << total_samples_received 
+                      << ", Rate: " << sample_rate/1e6 << " Msps"
+                      << ", Data: " << data_rate/1024.0/1024.0 << " MB/s" << std::flush;
         }
     }
     
@@ -329,24 +359,27 @@ void capture_chdr_packets(
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
     rx_stream->issue_stream_cmd(stream_cmd);
     
-    // Report statistics
+    // Final statistics
     auto elapsed = std::chrono::steady_clock::now() - start_time;
     double elapsed_secs = std::chrono::duration<double>(elapsed).count();
     
-    std::cout << "\nCapture Statistics:" << std::endl;
+    std::cout << "\n=== Capture Statistics ===" << std::endl;
     std::cout << "  Total packets captured: " << packets_captured << std::endl;
+    std::cout << "  Total samples received: " << total_samples_received << std::endl;
     std::cout << "  Total data captured: " << total_bytes/1024.0/1024.0 << " MB" << std::endl;
-    std::cout << "  Average data rate: " << (total_bytes/elapsed_secs)/1024.0/1024.0 << " MB/s" << std::endl;
     std::cout << "  Capture duration: " << elapsed_secs << " seconds" << std::endl;
+    std::cout << "  Average sample rate: " << (total_samples_received/elapsed_secs)/1e6 << " Msps" << std::endl;
+    std::cout << "  Average data rate: " << (total_bytes/elapsed_secs)/1024.0/1024.0 << " MB/s" << std::endl;
+    std::cout << "  Average samples per packet: " << (packets_captured > 0 ? total_samples_received/packets_captured : 0) << std::endl;
     
     // Perform analysis if requested
-    if (enable_analysis && !csv_file.empty()) {
-        std::cout << "\nAnalyzing captured packets..." << std::endl;
+    if (enable_analysis && !csv_file.empty() && !captured_packets.empty()) {
+        std::cout << "\nAnalyzing " << captured_packets.size() << " captured packets..." << std::endl;
         analyze_packets(captured_packets, csv_file, chdr_width_bits);
     }
 }
 
-// Analyze captured packets and write to CSV
+// Enhanced analysis function with better sample handling
 void analyze_packets(const std::vector<chdr_packet_data>& packets, 
                     const std::string& csv_file,
                     size_t chdr_width_bits)
@@ -358,7 +391,8 @@ void analyze_packets(const std::vector<chdr_packet_data>& packets,
     
     // Write CSV header
     csv << "packet_num,vc,eob,eov,pkt_type,pkt_type_str,num_mdata,seq_num,length,"
-        << "dst_epid,has_timestamp,timestamp,payload_size,payload_sample" << std::endl;
+        << "dst_epid,has_timestamp,timestamp,payload_size,sample_format,num_samples,"
+        << "first_sample_hex,first_sample_real,first_sample_imag" << std::endl;
     
     // Analyze each packet
     for (size_t i = 0; i < packets.size(); ++i) {
@@ -391,14 +425,56 @@ void analyze_packets(const std::vector<chdr_packet_data>& packets,
         // Payload info
         csv << "," << std::dec << pkt.payload.size() << ",";
         
-        // Sample of payload data (first 8 bytes as hex)
-        if (pkt.payload.size() >= 8) {
-            csv << "0x";
-            for (int j = 0; j < 8; ++j) {
-                csv << std::hex << std::setw(2) << static_cast<int>(pkt.payload[j]);
+        // Determine sample format and parse first sample
+        if (pkt.payload.size() >= 4) {  // At least one sc16 sample
+            // Assume sc16 format (most common)
+            size_t samples_per_payload = pkt.payload.size() / 4;  // 4 bytes per sc16 sample
+            csv << "sc16," << samples_per_payload << ",";
+            
+            // Extract first sample as sc16 (2 bytes real, 2 bytes imag)
+            if (pkt.payload.size() >= 4) {
+                const int16_t* sample_data = reinterpret_cast<const int16_t*>(pkt.payload.data());
+                int16_t real_part = sample_data[0];
+                int16_t imag_part = sample_data[1];
+                
+                // Hex representation
+                csv << "0x";
+                for (int j = 0; j < 4; ++j) {
+                    csv << std::hex << std::setw(2) << std::setfill('0') 
+                        << static_cast<unsigned int>(pkt.payload[j]);
+                }
+                csv << "," << std::dec << real_part << "," << imag_part;
+            } else {
+                csv << "N/A,N/A,N/A";
             }
+        } else if (pkt.payload.size() >= 8) {  // Could be fc32
+            size_t samples_per_payload = pkt.payload.size() / 8;  // 8 bytes per fc32 sample
+            csv << "fc32," << samples_per_payload << ",";
+            
+            const float* sample_data = reinterpret_cast<const float*>(pkt.payload.data());
+            float real_part = sample_data[0];
+            float imag_part = sample_data[1];
+            
+            // Hex representation of first 8 bytes
+            csv << "0x";
+            for (int j = 0; j < std::min(8, (int)pkt.payload.size()); ++j) {
+                csv << std::hex << std::setw(2) << std::setfill('0') 
+                    << static_cast<unsigned int>(pkt.payload[j]);
+            }
+            csv << "," << std::dec << real_part << "," << imag_part;
         } else {
-            csv << "N/A";
+            csv << "unknown,0,";
+            // Just show first few bytes as hex
+            if (pkt.payload.size() > 0) {
+                csv << "0x";
+                for (size_t j = 0; j < std::min((size_t)8, pkt.payload.size()); ++j) {
+                    csv << std::hex << std::setw(2) << std::setfill('0') 
+                        << static_cast<unsigned int>(pkt.payload[j]);
+                }
+                csv << ",N/A,N/A";
+            } else {
+                csv << "N/A,N/A,N/A";
+            }
         }
         
         csv << std::endl;
@@ -408,6 +484,61 @@ void analyze_packets(const std::vector<chdr_packet_data>& packets,
     std::cout << "Analysis complete. Results written to: " << csv_file << std::endl;
 }
 
+// Helper function to format sample data for different types
+template<typename T>
+std::string format_sample_data(const std::vector<uint8_t>& payload, size_t max_samples = 5) {
+    if (payload.size() < sizeof(std::complex<T>)) {
+        return "N/A";
+    }
+    
+    std::stringstream ss;
+    const std::complex<T>* samples = reinterpret_cast<const std::complex<T>*>(payload.data());
+    size_t num_samples = std::min(max_samples, payload.size() / sizeof(std::complex<T>));
+    
+    ss << "[";
+    for (size_t i = 0; i < num_samples; ++i) {
+        if (i > 0) ss << ", ";
+        ss << "(" << samples[i].real() << "+" << samples[i].imag() << "j)";
+    }
+    if (num_samples < payload.size() / sizeof(std::complex<T>)) {
+        ss << "...";
+    }
+    ss << "]";
+    
+    return ss.str();
+}
+
+// Function to dump raw payload data as hex for debugging
+void dump_payload_hex(const std::vector<uint8_t>& payload, const std::string& filename) {
+    std::ofstream hexfile(filename);
+    if (!hexfile.is_open()) {
+        throw std::runtime_error("Failed to open hex dump file: " + filename);
+    }
+    
+    hexfile << "Payload size: " << payload.size() << " bytes\n";
+    hexfile << "Hex dump:\n";
+    
+    for (size_t i = 0; i < payload.size(); i += 16) {
+        // Address
+        hexfile << std::hex << std::setw(8) << std::setfill('0') << i << ": ";
+        
+        // Hex bytes
+        for (size_t j = 0; j < 16 && (i + j) < payload.size(); ++j) {
+            hexfile << std::hex << std::setw(2) << std::setfill('0') 
+                   << static_cast<unsigned int>(payload[i + j]) << " ";
+        }
+        
+        // ASCII representation
+        hexfile << " |";
+        for (size_t j = 0; j < 16 && (i + j) < payload.size(); ++j) {
+            uint8_t byte = payload[i + j];
+            hexfile << (isprint(byte) ? static_cast<char>(byte) : '.');
+        }
+        hexfile << "|\n";
+    }
+    
+    hexfile.close();
+}
 // Analyze existing capture file
 void analyze_capture_file(const std::string& input_file, 
                          const std::string& csv_file)
@@ -481,7 +612,7 @@ void analyze_capture_file(const std::string& input_file,
     analyze_packets(packets, csv_file, chdr_width_bits);
 }
 
-// Main function
+// Updated main function with better SPP/SPB defaults and configuration
 int UHD_SAFE_MAIN(int argc, char* argv[])
 {
     // Variables for program options
@@ -492,7 +623,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     bool analyze_only = false;
     bool show_graph = false;
     
-    // Setup program options
+    // Setup program options with better defaults
     po::options_description desc("Allowed options");
     desc.add_options()
         ("help", "help message")
@@ -513,8 +644,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("chdr-width", po::value<size_t>(&chdr_width)->default_value(64), "CHDR width in bits")
         ("time", po::value<double>(&time_requested)->default_value(0.0), "time to start capture")
         ("show-graph", po::value<bool>(&show_graph)->default_value(false), "print RFNoC graph info")
-        ("spp", po::value<size_t>(&spp), "samples per packet (on FPGA and wire)")
-        ("spb", po::value<size_t>(&spb)->default_value(10000), "samples per buffer")
+        ("spp", po::value<size_t>(&spp), "samples per packet (CRITICAL: min 200 for 1GigE, min 1000 for 10GigE)")
+        ("spb", po::value<size_t>(&spb)->default_value(0), "samples per buffer (0=auto, must be >= SPP)")
     ;
     
     po::variables_map vm;
@@ -526,12 +657,18 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         std::cout << "UHD CHDR Packet Capture and Analysis Tool" << std::endl;
         std::cout << desc << std::endl;
         std::cout << std::endl;
-        std::cout << "This tool captures data from RFNoC blocks and stores it with CHDR formatting." << std::endl;
+        std::cout << "Performance Tips:" << std::endl;
+        std::cout << "  - CRITICAL: SPP must be >= 200 (preferably 500+)" << std::endl;
+        std::cout << "  - SPP is set in stream arguments, not radio block properties" << std::endl;
+        std::cout << "  - For 1GigE: Use --spp 500-1000, ensure MTU=1500" << std::endl;
+        std::cout << "  - For 10GigE: Use --spp 1000-4000, ensure MTU=9000" << std::endl;
+        std::cout << "  - Small SPP causes network flooding and overflows!" << std::endl;
+        std::cout << "  - Higher rates need proportionally larger SPP" << std::endl;
         std::cout << "Examples:" << std::endl;
-        std::cout << "  Capture packets: " << argv[0] << " --rate 10e6 --freq 100e6 --num-packets 1000" << std::endl;
-        std::cout << "  Capture and analyze: " << argv[0] << " --rate 10e6 --csv analysis.csv" << std::endl;
-        std::cout << "  Analyze existing file: " << argv[0] << " --analyze-only --file capture.dat --csv analysis.csv" << std::endl;
-        std::cout << "  Show graph info: " << argv[0] << " --show-graph" << std::endl;
+        std::cout << "  Basic capture: " << argv[0] << " --rate 1e6 --freq 2.4e9" << std::endl;
+        std::cout << "  Good performance: " << argv[0] << " --rate 1e6 --freq 2.4e9 --spp 500" << std::endl;
+        std::cout << "  High rate: " << argv[0] << " --rate 10e6 --freq 2.4e9 --spp 1000" << std::endl;
+        std::cout << "  With analysis: " << argv[0] << " --rate 1e6 --spp 500 --csv analysis.csv" << std::endl;
         return EXIT_SUCCESS;
     }
     
@@ -544,6 +681,45 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         return EXIT_SUCCESS;
     }
     
+    // Calculate optimal SPP and SPB if not specified
+    if (!vm.count("spp")) {
+        // Auto-calculate reasonable SPP based on rate and connection type
+        // X310 with 1GigE needs larger packets to avoid overhead
+        if (rate <= 1e6) {
+            spp = 500;   // For low rates, moderate packet size
+        } else if (rate <= 5e6) {
+            spp = 1000;  // For medium rates
+        } else if (rate <= 25e6) {
+            spp = 2000;  // For higher rates, larger packets
+        } else {
+            spp = 4000;  // For very high rates
+        }
+        std::cout << "Auto-calculated SPP: " << spp << " (use --spp to override)" << std::endl;
+        std::cout << "  (Based on rate=" << rate/1e6 << " Msps)" << std::endl;
+    }
+    
+    if (spb == 0) {
+        // Auto-calculate SPB as multiple of SPP, but reasonable size
+        spb = std::max((size_t)1000, spp * 2);  // At least 1000 samples, or 2x SPP
+        spb = std::min(spb, (size_t)20000);     // But not more than 20k samples
+        std::cout << "Auto-calculated SPB: " << spb << " (use --spb to override)" << std::endl;
+    }
+    
+    // Validate parameters and enforce minimums for performance
+    if (spp > 10000) {
+        std::cerr << "Warning: Very large SPP (" << spp << ") may cause performance issues" << std::endl;
+    }
+    if (spp < 100) {
+        std::cerr << "ERROR: SPP too small (" << spp << ") - minimum recommended is 200" << std::endl;
+        std::cerr << "Small SPP values cause packet overhead and network flooding!" << std::endl;
+        std::cerr << "For 1GigE: use SPP 200-1000, for 10GigE: use SPP 1000-4000" << std::endl;
+        return EXIT_FAILURE;
+    }
+    if (spb < spp) {
+        std::cerr << "ERROR: SPB (" << spb << ") must be >= SPP (" << spp << ")" << std::endl;
+        return EXIT_FAILURE;
+    }
+    
     // Set up Ctrl+C handler
     std::signal(SIGINT, &sig_int_handler);
     if (num_packets == 0) {
@@ -551,7 +727,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     }
     
     // Create RFNoC graph
-    std::cout << "Creating RFNoC graph with args: " << args << std::endl;
+    std::cout << "\nCreating RFNoC graph with args: " << args << std::endl;
     auto graph = uhd::rfnoc::rfnoc_graph::make(args);
     
     // Print graph info if requested
@@ -566,7 +742,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     // Configure radio
     std::cout << "Using radio " << radio_id << ", channel " << radio_chan << std::endl;
 
-    // Wait for lo_locked before setting frequency (similar to working example)
+    // Wait for lo_locked before setting frequency
     std::cout << "Waiting for \"lo_locked\": " << std::flush;
     while (not radio_ctrl->get_rx_sensor("lo_locked", radio_chan).to_bool()) {
         std::this_thread::sleep_for(50ms);
@@ -580,14 +756,13 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         radio_ctrl->set_rx_bandwidth(bw, radio_chan);
     }
     
-    bool user_block_found = false;
-    // Find the RX path from radio to SEP
+    // Find the RX path and configure blocks
     uhd::rfnoc::block_id_t last_block_id = radio_ctrl_id;
     size_t last_port = radio_chan;
     
     uhd::rfnoc::block_id_t last_block_in_chain;
     size_t last_port_in_chain;
-    { // First, connect everything dangling off of the radio
+    {
         auto edges = uhd::rfnoc::get_block_chain(graph, radio_ctrl_id, radio_chan, true);
         last_block_in_chain = edges.back().src_blockid;
         last_port_in_chain  = edges.back().src_port;
@@ -597,84 +772,37 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                 radio_chan,
                 last_block_in_chain,
                 last_port_in_chain);
-            for (auto& edge : edges) {
-                // if (uhd::rfnoc::block_id_t(edge.dst_blockid).get_block_name() == "DDC") {
-                //     ddc_ctrl =
-                //         graph->get_block<uhd::rfnoc::ddc_block_control>(edge.dst_blockid);
-                //     ddc_chan = edge.dst_port;
-                // }
-                if (vm.count("block-id") && edge.dst_blockid == block_id) {
-                    user_block_found = true;
-                }
-            }
         }
     }
-
 
     last_block_id = last_block_in_chain;
     last_port = last_port_in_chain;
 
-    /*
-    //Check if user specified a block to insert
-    //TODO: Fix this please, similar to the above logic
-    if (!block_id.empty()) {
-        if (graph->has_block(block_id)) {
-            std::cout << "Inserting user block: " << block_id << std::endl;
-            
-            // Connect through blocks from radio to user block
-            auto edges1 = uhd::rfnoc::connect_through_blocks(
-                graph, radio_ctrl_id, radio_chan, 
-                uhd::rfnoc::block_id_t(block_id), 0);
-            
-            // Now find path from user block to SEP
-            last_block_id = uhd::rfnoc::block_id_t(block_id);
-            last_port = block_port;
-            
-            // Check if there are more static connections after user block
-            auto edges2 = uhd::rfnoc::get_block_chain(
-                graph, last_block_id, last_port, true);
-            
-            if (edges2.size() > 1) {
-                // Connect through to the end of the chain
-                uhd::rfnoc::connect_through_blocks(
-                    graph, last_block_id, last_port,
-                    edges2.back().src_blockid, edges2.back().src_port);
-                last_block_id = uhd::rfnoc::block_id_t(edges2.back().src_blockid);
-                last_port = edges2.back().src_port;
-            }
-        } else {
-            std::cerr << "Warning: Block " << block_id << " not found" << std::endl;
-        }
-    }
-    */
-
-    // Find the edge that connects to SEP
-    auto last_edge = find_rx_edge_to_sep(graph, last_block_id, last_port);
-    last_block_id = uhd::rfnoc::block_id_t(last_edge.src_blockid);
-
-    last_port = last_edge.src_port;
-
-
-    if (vm.count("spp")) {
-        std::cout << "Requesting samples per packet of: " << spp << std::endl;
-        radio_ctrl->set_property<int>("spp", spp, radio_chan);
-        spp = radio_ctrl->get_property<int>("spp", radio_chan);
-        std::cout << "Actual samples per packet = " << spp << std::endl;
-    }
-
-    
-    
-    // Create RX streamer
+    // Create RX streamer with proper stream args
     uhd::stream_args_t stream_args(format, "sc16");
-    stream_args.channels = {0};  // Single channel streamer
+    stream_args.channels = {0};
     
+    // CRITICAL: Set SPP in stream arguments, not on radio block
+    // This is the correct way to control packet size in RFNoC
+    stream_args.args["spp"] = std::to_string(spp);
     
-    std::cout << "Creating RX streamer..." << std::endl;
+    std::cout << "Setting SPP in stream arguments: " << spp << std::endl;
+    
+    std::cout << "Creating RX streamer with format=" << format << ", otw=sc16, spp=" << spp << std::endl;
     auto rx_stream = graph->create_rx_streamer(1, stream_args);
     
+    // Verify the actual SPP used by the streamer
+    size_t max_spp = rx_stream->get_max_num_samps();
+    std::cout << "Streamer max samples per packet: " << max_spp << std::endl;
+    
+    // Adjust SPB if needed based on actual max SPP
+    if (spb > max_spp) {
+        spb = max_spp;
+        std::cout << "SPB adjusted to max possible: " << spb << std::endl;
+    }
+    
     // Connect streamer to last block in chain
-    std::cout << "Connecting " << last_block_id << ":" << last_port 
-              << " to streamer..." << std::endl;
+    std::cout << "Connecting " << last_block_id << ":" << last_port << " to streamer..." << std::endl;
     graph->connect(last_block_id, last_port, rx_stream, 0);
     
     // Commit the graph
@@ -685,19 +813,15 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     for (auto& edge : graph->enumerate_active_connections()) {
         std::cout << "  * " << edge.to_string() << std::endl;
     }
-    std::cout << std::endl;
     
-    // Set sample rate on the appropriate block
-    std::cout << "Requesting RX Rate: " << (rate / 1e6) << " Msps..." << std::endl;
+    // Set sample rate
+    std::cout << "\nRequesting RX Rate: " << (rate / 1e6) << " Msps..." << std::endl;
     
-    // Check if we have a DDC in the path
+    // Look for DDC in the path and set rate appropriately
     uhd::rfnoc::ddc_block_control::sptr ddc_ctrl;
     size_t ddc_chan = 0;
     
-    // Look for DDC in the path
-    auto edges = uhd::rfnoc::get_block_chain(
-        graph, radio_ctrl_id, radio_chan, true);
-    
+    auto edges = uhd::rfnoc::get_block_chain(graph, radio_ctrl_id, radio_chan, true);
     for (const auto& edge : edges) {
         auto block_id = uhd::rfnoc::block_id_t(edge.src_blockid);
         if (block_id.match("DDC")) {
@@ -717,7 +841,44 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     
     std::cout << "Actual RX Rate: " << (rate / 1e6) << " Msps" << std::endl;
     
-    // Capture packets
+    // Print final streaming configuration
+    std::cout << "\n=== Final Streaming Configuration ===" << std::endl;
+    std::cout << "Sample rate: " << rate/1e6 << " Msps" << std::endl;
+    std::cout << "Requested samples per packet: " << spp << std::endl;
+    std::cout << "Samples per buffer: " << spb << std::endl;
+    std::cout << "Max samples per packet (from streamer): " << rx_stream->get_max_num_samps() << std::endl;
+    std::cout << "Sample format: " << format << std::endl;
+    std::cout << "CHDR width: " << chdr_width << " bits" << std::endl;
+    
+    // Calculate packet efficiency based on actual max SPP
+    size_t actual_max_spp = rx_stream->get_max_num_samps();
+    size_t effective_spp = std::min(spp, actual_max_spp);
+    size_t bytes_per_sample = (format == "sc16") ? 4 : (format == "fc32") ? 8 : 16;
+    size_t payload_bytes = effective_spp * bytes_per_sample;
+    size_t header_bytes = (chdr_width / 8) + 8; // CHDR header + timestamp
+    size_t total_packet_bytes = payload_bytes + header_bytes;
+    double efficiency = (double)payload_bytes / total_packet_bytes * 100.0;
+    
+    std::cout << "\nPacket Efficiency Analysis:" << std::endl;
+    std::cout << "  Effective SPP: " << effective_spp << " samples" << std::endl;
+    std::cout << "  Payload: " << payload_bytes << " bytes" << std::endl;
+    std::cout << "  Headers: " << header_bytes << " bytes" << std::endl;
+    std::cout << "  Total: " << total_packet_bytes << " bytes" << std::endl;
+    std::cout << "  Efficiency: " << std::fixed << std::setprecision(1) << efficiency << "%" << std::endl;
+    
+    if (effective_spp < spp) {
+        std::cout << "  NOTE: Requested SPP (" << spp << ") exceeded max (" << actual_max_spp << ")" << std::endl;
+    }
+    
+    if (efficiency < 80.0) {
+        std::cout << "  WARNING: Low efficiency! Consider increasing SPP" << std::endl;
+    } else if (efficiency > 95.0) {
+        std::cout << "  EXCELLENT: High efficiency!" << std::endl;
+    } else {
+        std::cout << "  GOOD: Reasonable efficiency" << std::endl;
+    }
+    
+    // Start capture
     bool enable_analysis = !csv_file.empty();
     
     if (format == "sc16") {
