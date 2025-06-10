@@ -18,10 +18,11 @@ set(VERSION_ABI   0)
 ########################################################################
 # Setup install directories
 ########################################################################
-include(GNUInstallDirs)
-set(UHD_PKG_DATA_DIR ${CMAKE_INSTALL_DATAROOTDIR}/uhd/
+set(RFNOC_DATA_DIR     share
+    CACHE PATH "Base location for data")
+set(UHD_PKG_DATA_DIR ${RFNOC_DATA_DIR}/uhd/
     CACHE PATH "Path to install UHD-related package data")
-set(RFNOC_PKG_DATA_DIR ${CMAKE_INSTALL_DATAROOTDIR}/uhd/rfnoc/
+set(RFNOC_PKG_DATA_DIR ${RFNOC_DATA_DIR}/uhd/rfnoc/
     CACHE PATH "Path to install RFNoC package data")
 set(GATEWARE_PKG_DATA_DIR ${RFNOC_PKG_DATA_DIR}/fpga/gain
     CACHE PATH "Path to install RFNoC package data")
@@ -29,6 +30,28 @@ set(PROJECT_DATA_DIR   ${RFNOC_PKG_DATA_DIR}/gain/
     CACHE PATH "Path for this project's package data")
 set(MODULES_D_DIR   ${UHD_PKG_DATA_DIR}/modules.d/
     CACHE PATH "Path for the UHD modules.d/ directory")
+
+if(NOT DEFINED LIB_SUFFIX AND REDHAT AND CMAKE_SYSTEM_PROCESSOR MATCHES "64$")
+    set(LIB_SUFFIX 64)
+endif()
+if(CMAKE_INSTALL_LIBDIR MATCHES lib64)
+    set(LIB_SUFFIX 64)
+endif()
+
+########################################################################
+# Check if number of jobs have been provided, otherwise use 4 threads
+########################################################################
+if(NOT DEFINED JOBS)
+    set(JOBS 4)
+endif()
+
+########################################################################
+# Check if vivado GUI is requested, default to using GUI to build
+########################################################################
+if(NOT DEFINED VIV_GUI)
+    set(VIV_GUI TRUE)
+endif()
+
 
 ########################################################################
 # Find bash (for executing make and sourcing the Vivado env)
@@ -99,7 +122,7 @@ set(UHD_FPGA_DIR "" CACHE PATH "Path to FPGA source directory")
 message(STATUS "Checking FPGA source directory...")
 if(NOT UHD_FPGA_DIR)
     message(WARNING
-        "Could not find FPGA directory. Skipping all FPGA targets. "
+        "Could not find FPGA directory. Skipping all FPGA targets."
         "Please provide it using -DUHD_FPGA_DIR!")
 endif(NOT UHD_FPGA_DIR)
 if(UHD_FPGA_DIR AND NOT EXISTS ${UHD_FPGA_DIR}/usrp3/top/Makefile.common)
@@ -110,13 +133,9 @@ if(UHD_FPGA_DIR AND NOT EXISTS ${UHD_FPGA_DIR}/usrp3/top/Makefile.common)
 endif()
 message(STATUS "Using FPGA source directory: ${UHD_FPGA_DIR}")
 
-# We make E310 the default device, because this can be programmed with the free
-# tier of Vivado. The other devices require a license.
-set(UHD_FPGA_DEFAULT_DEVICE "e31x"
+set(UHD_FPGA_DEFAULT_DEVICE "x310"
     CACHE STRING "Default device for testbench execution")
 
-# As above, we set this to a value that works with the free tier of Vivado.
-# Other values require a license (e.g., for ModelSim).
 set(FPGA_SIM_CMD "xsim"
     CACHE STRING "Executable for running testbenches (e.g., xsim, vsim)")
 
@@ -171,10 +190,15 @@ macro(RFNOC_REGISTER_IMAGE_CORE)
         message(FATAL_ERROR
             "Invalid image core source file name: ${_rfnoc_image_core_SRC} (must end in `image_core`)")
     endif()
-    if (_rfnoc_image_builder_exe)
+    if (_rfnoc_image_builder_exe AND VIV_GUI)
         message(STATUS "Adding image core target: ${_target_name}")
         add_custom_target(${_target_name}
-            COMMAND ${_rfnoc_image_builder_exe} -F ${UHD_FPGA_DIR} -y ${CMAKE_CURRENT_SOURCE_DIR}/${_rfnoc_image_core_SRC} -I ${CMAKE_SOURCE_DIR} -B ${CMAKE_BINARY_DIR}/build-${_target_name} -O ${CMAKE_BINARY_DIR} -E ${CMAKE_BINARY_DIR}/build-ip
+            COMMAND ${_rfnoc_image_builder_exe} -F ${UHD_FPGA_DIR} -y ${CMAKE_CURRENT_SOURCE_DIR}/${_rfnoc_image_core_SRC} -I ${CMAKE_SOURCE_DIR} -B ${CMAKE_BINARY_DIR}/build-${_target_name} -O ${CMAKE_BINARY_DIR} -E ${CMAKE_BINARY_DIR}/build-ip -g -j${JOBS}
+        )
+    elseif(_rfnoc_image_builder_exe)
+        message(STATUS "Adding image core target: ${_target_name}")
+        add_custom_target(${_target_name}
+            COMMAND ${_rfnoc_image_builder_exe} -F ${UHD_FPGA_DIR} -y ${CMAKE_CURRENT_SOURCE_DIR}/${_rfnoc_image_core_SRC} -I ${CMAKE_SOURCE_DIR} -B ${CMAKE_BINARY_DIR}/build-${_target_name} -O ${CMAKE_BINARY_DIR} -E ${CMAKE_BINARY_DIR}/build-ip -j${JOBS}
         )
     endif()
 endmacro()
@@ -194,18 +218,20 @@ add_custom_target(uninstall
 # Install cmake search helper for this library
 ########################################################################
 if(NOT CMAKE_MODULES_DIR)
-    set(CMAKE_MODULES_DIR ${CMAKE_INSTALL_LIBDIR}/cmake)
+    set(CMAKE_MODULES_DIR lib${LIB_SUFFIX}/cmake)
 endif(NOT CMAKE_MODULES_DIR)
 
-install(FILES cmake/Modules/rfnoc-gainConfig.cmake
-    DESTINATION ${CMAKE_MODULES_DIR}/rfnoc-gain
-)
+#TODO
+#install(FILES cmake/Modules/RfnocExampleConfig.cmake
+#    DESTINATION ${CMAKE_MODULES_DIR}/rfnoc
+#)
 
 ########################################################################
 # Subdirectories
 ########################################################################
 if(UHD_FPGA_DIR)
     add_subdirectory(rfnoc)
+    add_subdirectory(fpga/gain)
     add_subdirectory(icores)
 endif()
 if(UHD_FOUND)
