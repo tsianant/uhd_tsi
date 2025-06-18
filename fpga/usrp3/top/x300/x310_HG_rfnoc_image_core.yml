@@ -16,33 +16,98 @@ inherit:
 # A list of all stream endpoints in design
 # ----------------------------------------
 stream_endpoints:
-  ep0:                                  # Stream endpoint name
-    buff_size: 65536                    # Ingress buffer size for data
-  ep1:
-    buff_size: 0
-  ep2:
-    buff_size: 65536
-  ep3:
-    buff_size: 0
-  ep4:
+  eprx0:
+    buff_size: 0                    # Ingress buffer size for data
+  eprx1:
+    buff_size: 0                    # Ingress buffer size for data
+  epddc0:                                  # Stream endpoint name
+    buff_size: 4096                    # Ingress buffer size for data
+  epddc1:                              #DDC1 is supposed to be the MUXED RF signal input
+    buff_size: 4096
+  epsig0:
     buff_size: 4096
     ctrl: False
     data: True
-  ep5:
+  epsig1:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  epsigsplit0:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  epsigsplit1:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  epadd:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  epinswitch0:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  epinswitch1:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  eprxsplit0:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  eprxsplit1:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  epoutswitch0:
+    buff_size: 4096
+    ctrl: False
+    data: True
+  epoutswitch1:
     buff_size: 4096
     ctrl: False
     data: True
 
 # A list of all NoC blocks in design
 # ----------------------------------
-noc_blocks:
-  replay0:
-    block_desc: 'replay.yml'
+  switchin:
+    block_desc: 'switchboard.yml'
     parameters:
-      NUM_PORTS: 2
-      MEM_DATA_W: 64
-      MEM_ADDR_W: 30
-    priority: 99 # Make sure they come after the blocks defined in x3xx_radio_base.yml
+      NUM_INPUTS: 3
+      NUM_OUTPUTS: 2
+    priority: 99
+  switchout:
+    block_desc: 'switchboard.yml'
+    parameters:
+      NUM_INPUTS: 4
+      NUM_OUTPUTS: 2
+    priority: 99
+  addsub:
+    block_desc: 'addsub.yml'
+    priority: 99
+  sig0:
+    block_desc: 'siggen.yml'
+    parameters:
+      NUM_PORTS: 1
+    priority: 99
+  sig1:
+    block_desc: 'siggen.yml'
+    parameters:
+      NUM_PORTS: 1
+    priority: 99
+  sigsplit:
+    block_desc: 'split_stream.yml'
+    parameters:
+      NUM_PORTS: 1
+      NUM_BRANCHES: 2
+    priority: 99
+  rxsplit:
+    block_desc: 'split_stream.yml'
+    parameters:
+      NUM_PORTS: 1
+      NUM_BRANCHES: 2
+    priority: 99
 
 # A list of all static connections in design
 # ------------------------------------------
@@ -52,14 +117,40 @@ noc_blocks:
 #   - dstblk  = Destination block to connect
 #   - dstport = Port on the destination block to connect
 connections:
-  # Replay Connections
-  - { srcblk: ep4,     srcport: out0,  dstblk: replay0, dstport: in_0 }
-  - { srcblk: replay0, srcport: out_0, dstblk: ep4,     dstport: in0  }
-  - { srcblk: ep5,     srcport: out0,  dstblk: replay0, dstport: in_1 }
-  - { srcblk: replay0, srcport: out_1, dstblk: ep5,     dstport: in0  }
+  # Incoming Connections to blocks
+  - { srcblk: eprx0,        srcport: out0,   dstblk: switchin,  dstport: in_0 }
+  - { srcblk: eprx1,        srcport: out0,   dstblk: switchout, dstport: in_1 }
+  - { srcblk: epsig0,       srcport: out0,   dstblk: sigsplit,  dstport: in_0 }
+  - { srcblk: epsig1,       srcport: out0,   dstblk: addsub,    dstport: in_b }
+  - { srcblk: epsigsplit0,  srcport: out0,   dstblk: switchin,  dstport: in_2 }
+  - { srcblk: epsigsplit1,  srcport: out0,   dstblk: addsub,    dstport: in_a }
+  - { srcblk: epadd,        srcport: out0,   dstblk: switchin,  dstport: in_1 }
+  - { srcblk: epinswitch0,  srcport: out0,   dstblk: switchout, dstport: in_0 }
+  - { srcblk: epinswitch1,  srcport: out0,   dstblk: rxsplit,   dstport: in_0 }
+  - { srcblk: eprxsplit0,   srcport: out0,   dstblk: switchout, dstport: in_2 }
+  - { srcblk: eprxsplit1,   srcport: out0,   dstblk: switchout, dstport: in_3 }
+  - { srcblk: epoutswitch0, srcport: out0,   dstblk: ddc0,      dstport: in_0 }
+  - { srcblk: epoutswitch1, srcport: out0,   dstblk: ddc1,      dstport: in_0 }
+  
+
+  # Outgoing Connections from blocks
+  - { srcblk: sig0,      srcport: out_0,  dstblk: epsig0,       dstport: in0    }
+  - { srcblk: sig1,      srcport: out_0,  dstblk: epsig1,       dstport: in0    }
+  - { srcblk: sigsplit,  srcport: out_0,  dstblk: epsigsplit0,  dstport: in0    }
+  - { srcblk: sigsplit,  srcport: out_1,  dstblk: epsigsplit1,  dstport: in0    }
+  - { srcblk: addsub,    srcport: add,    dstblk: epadd,        dstport: in0    }
+  - { srcblk: addsub,    srcport: sub,    dstblk: _device_,     dstport: _none_ }
+  - { srcblk: switchin,  srcport: out_0,  dstblk: epinswitch0,  dstport: in0    }
+  - { srcblk: switchin,  srcport: out_1,  dstblk: epinswitch1,  dstport: in0    }
+  - { srcblk: rxsplit,   srcport: out_0,  dstblk: eprxsplit0,   dstport: in0    }
+  - { srcblk: rxsplit,   srcport: out_1,  dstblk: eprxsplit0,   dstport: in0    }
+  - { srcblk: switchout, srcport: out_0,  dstblk: epoutswitch0, dstport: in0    }
+  - { srcblk: switchout, srcport: out_1,  dstblk: epoutswitch0, dstport: in0    }
+
   #
   # BSP Connections
-  - { srcblk: replay0,  srcport: axi_ram,  dstblk: _device_, dstport: dram }
+
+  # - { srcblk: replay0,  srcport: axi_ram,  dstblk: _device_, dstport: dram }
 
 # A list of all clock domain connections in design
 # ------------------------------------------------
@@ -69,4 +160,11 @@ connections:
 #   - dstblk  = Destination block to connect
 #   - dstport = Clock domain on the destination block to connect
 clk_domains:
-    - { srcblk: _device_, srcport: dram,  dstblk: replay0, dstport: mem  }
+  - { srcblk: _device_, srcport: ce,    dstblk: sig0,      dstport: ce  }
+  - { srcblk: _device_, srcport: ce,    dstblk: sig1,      dstport: ce  }
+  - { srcblk: _device_, srcport: ce,    dstblk: addsub,    dstport: ce  }
+  - { srcblk: _device_, srcport: ce,    dstblk: switchin,  dstport: ce  }
+  - { srcblk: _device_, srcport: ce,    dstblk: switchout, dstport: ce  }
+  
+    # - { srcblk: _device_, srcport: dram,  dstblk: replay0, dstport: mem  }
+
