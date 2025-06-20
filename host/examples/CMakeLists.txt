@@ -29,6 +29,7 @@ set(example_sources
     gpio.cpp
     spi.cpp
     sync_to_gps.cpp
+    raw_chdr_capture.cpp
     rfnoc_nullsource_ce_rx.cpp
     rfnoc_rx_to_file.cpp
     rfnoc_radio_loopback.cpp
@@ -45,7 +46,7 @@ endif(ENABLE_OCTOCLOCK)
 foreach(example_source ${example_sources})
     get_filename_component(example_name ${example_source} NAME_WE)
     add_executable(${example_name} ${example_source})
-    target_link_libraries(${example_name} uhd ${Boost_LIBRARIES})
+    target_link_libraries(${example_name} uhd ${Boost_LIBRARIES} ${PCAP_LIBRARIES})
     UHD_INSTALL(TARGETS ${example_name} RUNTIME DESTINATION ${PKG_LIB_DIR}/examples COMPONENT examples)
 endforeach(example_source)
 
