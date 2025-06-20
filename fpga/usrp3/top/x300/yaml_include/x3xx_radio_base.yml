@@ -37,7 +37,7 @@ noc_blocks:
   radio0:
     block_desc: 'radio.yml'
     parameters:
-      NUM_PORTS: 1
+      NUM_PORTS: 2
   ddc1:
     block_desc: 'ddc.yml'
     parameters:
@@ -60,11 +60,13 @@ connections:
   - { srcblk: _device_,  srcport: _none_, dstblk: radio0, dstport: in_0 }
   # RF A RX
   - { srcblk: radio0, srcport: out_0, dstblk: eprx0,   dstport: in0 }
-  - { srcblk: _device_,  srcport: _none_,  dstblk: ddc0,   dstport: in_0 }
+  - { srcblk: eprx0, srcport: out1, dstblk: _device_,   dstport: _none_ }
+  - { srcblk: epddc0,  srcport: out0,  dstblk: _device_,   dstport: _none_ }
   - { srcblk: ddc0,   srcport: out_0, dstblk: epddc0, dstport: in0  }
   # RF A RX2
-  - { srcblk: radio0, srcport: out_1, dstblk: eprx1,   dstport: in1 }
-  - { srcblk: _device_,  srcport: _none_,  dstblk: ddc1,    dstport: in_0 }
+  - { srcblk: radio0, srcport: out_1, dstblk: eprx1,   dstport: in0 }
+  - { srcblk: eprx1, srcport: out1, dstblk: _device_,   dstport: _none_ }
+  - { srcblk: epddc1,  srcport: out0,  dstblk: _device_,    dstport: _none_ }
   - { srcblk: ddc1,   srcport: out_0, dstblk: epddc1,  dstport: in0  }
   #
   # RF B TX

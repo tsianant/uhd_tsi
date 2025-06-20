@@ -21,56 +21,57 @@ stream_endpoints:
   eprx1:
     buff_size: 0                    # Ingress buffer size for data
   epddc0:                                  # Stream endpoint name
-    buff_size: 4096                    # Ingress buffer size for data
+    buff_size: 512                    # Ingress buffer size for data
   epddc1:                              #DDC1 is supposed to be the MUXED RF signal input
-    buff_size: 4096
+    buff_size: 512
   epsig0:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   epsig1:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   epsigsplit0:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   epsigsplit1:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   epadd:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   epinswitch0:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   epinswitch1:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   eprxsplit0:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   eprxsplit1:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   epoutswitch0:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
   epoutswitch1:
-    buff_size: 4096
+    buff_size: 512
     ctrl: False
     data: True
 
 # A list of all NoC blocks in design
 # ----------------------------------
+noc_blocks:
   switchin:
     block_desc: 'switchboard.yml'
     parameters:
@@ -131,6 +132,8 @@ connections:
   - { srcblk: eprxsplit1,   srcport: out0,   dstblk: switchout, dstport: in_3 }
   - { srcblk: epoutswitch0, srcport: out0,   dstblk: ddc0,      dstport: in_0 }
   - { srcblk: epoutswitch1, srcport: out0,   dstblk: ddc1,      dstport: in_0 }
+  - { srcblk: epddc0, srcport: out0,   dstblk: _device_,      dstport: _none_ }
+  - { srcblk: epddc1, srcport: out0,   dstblk: _device_,      dstport: _none_ }  
   
 
   # Outgoing Connections from blocks
@@ -143,9 +146,9 @@ connections:
   - { srcblk: switchin,  srcport: out_0,  dstblk: epinswitch0,  dstport: in0    }
   - { srcblk: switchin,  srcport: out_1,  dstblk: epinswitch1,  dstport: in0    }
   - { srcblk: rxsplit,   srcport: out_0,  dstblk: eprxsplit0,   dstport: in0    }
-  - { srcblk: rxsplit,   srcport: out_1,  dstblk: eprxsplit0,   dstport: in0    }
+  - { srcblk: rxsplit,   srcport: out_1,  dstblk: eprxsplit1,   dstport: in0    }
   - { srcblk: switchout, srcport: out_0,  dstblk: epoutswitch0, dstport: in0    }
-  - { srcblk: switchout, srcport: out_1,  dstblk: epoutswitch0, dstport: in0    }
+  - { srcblk: switchout, srcport: out_1,  dstblk: epoutswitch1, dstport: in0    }
 
   #
   # BSP Connections
@@ -163,8 +166,8 @@ clk_domains:
   - { srcblk: _device_, srcport: ce,    dstblk: sig0,      dstport: ce  }
   - { srcblk: _device_, srcport: ce,    dstblk: sig1,      dstport: ce  }
   - { srcblk: _device_, srcport: ce,    dstblk: addsub,    dstport: ce  }
-  - { srcblk: _device_, srcport: ce,    dstblk: switchin,  dstport: ce  }
-  - { srcblk: _device_, srcport: ce,    dstblk: switchout, dstport: ce  }
+  # - { srcblk: _device_, srcport: ce,    dstblk: switchin,  dstport: ce  }
+  # - { srcblk: _device_, srcport: ce,    dstblk: switchout, dstport: ce  }
   
     # - { srcblk: _device_, srcport: dram,  dstblk: replay0, dstport: mem  }
 
