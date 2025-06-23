@@ -17,56 +17,56 @@ inherit:
 # ----------------------------------------
 stream_endpoints:
   eprx0:
-    buff_size: 0                    # Ingress buffer size for data
+    buff_size: 1024                    # Ingress buffer size for data
   eprx1:
-    buff_size: 0                    # Ingress buffer size for data
+    buff_size: 1024                    # Ingress buffer size for data
   epddc0:                                  # Stream endpoint name
-    buff_size: 512                    # Ingress buffer size for data
+    buff_size: 4096                    # Ingress buffer size for data
   epddc1:                              #DDC1 is supposed to be the MUXED RF signal input
-    buff_size: 512
+    buff_size: 4096
   epsig0:
     buff_size: 512
-    ctrl: False
+    ctrl: True
     data: True
   epsig1:
-    buff_size: 512
-    ctrl: False
+    buff_size: 2048
+    ctrl: True
     data: True
   epsigsplit0:
-    buff_size: 512
-    ctrl: False
+    buff_size: 2048
+    ctrl: True
     data: True
   epsigsplit1:
     buff_size: 512
-    ctrl: False
+    ctrl: True
     data: True
   epadd:
     buff_size: 512
-    ctrl: False
+    ctrl: True
     data: True
   epinswitch0:
-    buff_size: 512
-    ctrl: False
+    buff_size: 2048
+    ctrl: True
     data: True
   epinswitch1:
-    buff_size: 512
-    ctrl: False
+    buff_size: 2048
+    ctrl: True
     data: True
   eprxsplit0:
     buff_size: 512
-    ctrl: False
+    ctrl: True
     data: True
   eprxsplit1:
     buff_size: 512
-    ctrl: False
+    ctrl: True
     data: True
   epoutswitch0:
-    buff_size: 512
-    ctrl: False
+    buff_size: 2048
+    ctrl: True
     data: True
   epoutswitch1:
-    buff_size: 512
-    ctrl: False
+    buff_size: 2048
+    ctrl: True
     data: True
 
 # A list of all NoC blocks in design
@@ -133,7 +133,9 @@ connections:
   - { srcblk: epoutswitch0, srcport: out0,   dstblk: ddc0,      dstport: in_0 }
   - { srcblk: epoutswitch1, srcport: out0,   dstblk: ddc1,      dstport: in_0 }
   - { srcblk: epddc0, srcport: out0,   dstblk: _device_,      dstport: _none_ }
-  - { srcblk: epddc1, srcport: out0,   dstblk: _device_,      dstport: _none_ }  
+  - { srcblk: epddc1, srcport: out0,   dstblk: _device_,      dstport: _none_ }
+  - { srcblk: epddc1, srcport: out0,   dstblk: _device_,      dstport: _none_ }
+    
   
 
   # Outgoing Connections from blocks
@@ -149,7 +151,9 @@ connections:
   - { srcblk: rxsplit,   srcport: out_1,  dstblk: eprxsplit1,   dstport: in0    }
   - { srcblk: switchout, srcport: out_0,  dstblk: epoutswitch0, dstport: in0    }
   - { srcblk: switchout, srcport: out_1,  dstblk: epoutswitch1, dstport: in0    }
-
+  - { srcblk: _device_,    srcport: _none_,    dstblk: sig0,     dstport: unused }
+  - { srcblk: _device_,    srcport: _none_,    dstblk: sig1,     dstport: unused }
+  
   #
   # BSP Connections
 

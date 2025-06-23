@@ -16,16 +16,16 @@ stream_endpoints:
     data: True                          # Endpoint passes data traffic
     buff_size: 0                    # Ingress buffer size for data
   eprx1:
-    ctrl: False
+    ctrl: True
     data: True
     buff_size: 0
   epddc0:
     buff_size: 4096
-    ctrl: False
+    ctrl: True
     data: True
   epddc1:
     buff_size: 4096
-    ctrl: False
+    ctrl: True
     data: True
 # A list of all NoC blocks in design
 # ----------------------------------

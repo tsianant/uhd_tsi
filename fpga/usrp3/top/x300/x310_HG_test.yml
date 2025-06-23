@@ -196,6 +196,7 @@ clk_domains:
   - { srcblk: _device_, srcport: ce,    dstblk: addsub,    dstport: ce  }
   # - { srcblk: _device_, srcport: ce,    dstblk: switchin,  dstport: ce  }
   # - { srcblk: _device_, srcport: ce,    dstblk: switchout, dstport: ce  }
+
   
-    # - { srcblk: _device_, srcport: dram,  dstblk: replay0, dstport: mem  }
+  # - { srcblk: _device_, srcport: dram,  dstblk: replay0, dstport: mem  }
 

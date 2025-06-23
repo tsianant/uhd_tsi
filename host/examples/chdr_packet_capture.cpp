@@ -76,6 +76,7 @@ struct chdr_packet_data {
     // Timestamp (if present)
     uint64_t timestamp;
     bool has_timestamp;
+    uint64_t time_seconds;
     
     // Metadata
     std::vector<uint64_t> metadata;
@@ -355,6 +356,7 @@ void capture_chdr_packets(
             chdr_packet_data pkt;
             pkt.header_raw = header;
             pkt.parse_header();
+            
             if (md.has_time_spec) {
                 pkt.timestamp = md.time_spec.to_ticks(tick_rate);
             }
@@ -367,7 +369,7 @@ void capture_chdr_packets(
         total_samples += num_rx_samps;
         
         // Progress update
-        if (packets_captured % 100 == 0) {
+        if (packets_captured % 10 == 0) {
             std::cout << "\rPackets: " << packets_captured 
                       << ", Samples: " << total_samples << std::flush;
         }
@@ -694,6 +696,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         if (block_id.match("DDC")) {
             ddc_ctrl = graph->get_block<uhd::rfnoc::ddc_block_control>(block_id);
             rate = ddc_ctrl->set_output_rate(rate, edge.src_port);
+
             break;
         }
     }
