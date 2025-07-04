@@ -38,6 +38,9 @@ set(example_sources
     #benchmark_streamer.cpp
 )
 
+pkg_check_modules(YAML_CPP REQUIRED yaml-cpp)
+
+
 if(ENABLE_OCTOCLOCK)
     list(APPEND example_sources test_clock_synch.cpp)
 endif(ENABLE_OCTOCLOCK)
@@ -46,7 +49,8 @@ endif(ENABLE_OCTOCLOCK)
 foreach(example_source ${example_sources})
     get_filename_component(example_name ${example_source} NAME_WE)
     add_executable(${example_name} ${example_source})
-    target_link_libraries(${example_name} uhd ${Boost_LIBRARIES} ${PCAP_LIBRARIES})
+    target_link_libraries(${example_name} uhd ${Boost_LIBRARIES} ${PCAP_LIBRARIES} ${YAML_CPP_LIBRARIES})
+    target_include_directories(${example_name} PRIVATE ${YAML_CPP_INCLUDE_DIRS})
     UHD_INSTALL(TARGETS ${example_name} RUNTIME DESTINATION ${PKG_LIB_DIR}/examples COMPONENT examples)
 endforeach(example_source)
 
