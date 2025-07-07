@@ -420,12 +420,13 @@ std::vector<std::pair<std::string, size_t>> find_all_stream_endpoints_enhanced(
                                 auto edges = graph->enumerate_active_connections();
                                 for (const auto& edge : edges) {
                                     if (edge.src_blockid == block_id && edge.src_port == port) {
-                                        // Check if downstream block is a SEP or terminal
-                                        uhd::rfnoc::block_id_t dst_id(edge.dst_blockid);
-                                        auto dst_block = graph->get_block(dst_id);
-                                        if (dst_block) {
-                                            // If connected to another processing block, skip
-                                            has_downstream = true;
+                                        // Is the next block a real processing block or just the SEP?
+                                        // A SEP (or NullSrcSink) means the port *is* a stream endpoint
+                                        // and must **not** be skipped.
+                                        if (edge.dst_blockid.find("SEP") == std::string::npos &&
+                                            edge.dst_blockid.find("NullSrcSink") == std::string::npos)
+                                        {
+                                            has_downstream = true;   // real processing block – skip
                                         }
                                         break;
                                     }
@@ -697,28 +698,39 @@ GraphTopology discover_graph_topology(uhd::rfnoc::rfnoc_graph::sptr graph) {
                           topology.active_connections.begin(), 
                           topology.active_connections.end());
     
+    // Discover stream endpoints - find blocks that connect TO SEPs
     for (const auto& edge : all_connections) {
-        topology.downstream_connections[edge.src_blockid][edge.src_port] = 
-            edge.dst_blockid + ":" + std::to_string(edge.dst_port);
-        topology.upstream_connections[edge.dst_blockid][edge.dst_port] = 
-            edge.src_blockid + ":" + std::to_string(edge.src_port);
+        if (edge.dst_blockid.find("SEP") != std::string::npos) {
+            // This edge connects to a SEP, so the source block/port can stream
+            topology.block_stream_ports[edge.src_blockid].push_back(edge.src_port);
+        }
     }
     
-    // Discover stream endpoints
+    // Also check for blocks with streaming capability that might not have SEPs
     for (const auto& block : topology.blocks) {
         if (block.has_stream_endpoint) {
-            // For DDC blocks, check each output port
-            if (block.block_type == "DDC") {
-                for (size_t port = 0; port < block.num_output_ports; ++port) {
-                    // Check if port is not connected downstream (terminal port)
-                    if (topology.downstream_connections[block.block_id].find(port) == 
-                        topology.downstream_connections[block.block_id].end()) {
-                        topology.block_stream_ports[block.block_id].push_back(port);
-                    }
+            // Skip if already found via SEP connection
+            if (topology.block_stream_ports.find(block.block_id) != topology.block_stream_ports.end()) {
+                continue;
+            }
+            
+            // For blocks like Radio that might not show SEP connections in the static list
+            bool has_sep_connection = false;
+            for (const auto& edge : all_connections) {
+                if (edge.src_blockid == block.block_id && 
+                    edge.dst_blockid.find("SEP") != std::string::npos) {
+                    has_sep_connection = true;
+                    break;
                 }
-            } else {
-                // For other blocks, typically port 0
-                topology.block_stream_ports[block.block_id].push_back(0);
+            }
+            
+            if (!has_sep_connection && (block.block_type == "Radio" || 
+                                       block.block_type == "DmaFIFO" ||
+                                       block.block_type == "Replay")) {
+                // These blocks can stream even without visible SEP connections
+                for (size_t port = 0; port < block.num_output_ports; ++port) {
+                    topology.block_stream_ports[block.block_id].push_back(port);
+                }
             }
         }
     }
@@ -1247,6 +1259,341 @@ std::vector<std::pair<std::string, size_t>> detect_stream_endpoints(
 // Forward declarations
 bool auto_connect_radio_to_ddc(uhd::rfnoc::rfnoc_graph::sptr graph);
 
+// Check if a block type typically has streaming capability
+bool is_potentially_streamable_block(const std::string& block_type) {
+    // List of block types that typically support streaming
+    static const std::set<std::string> streamable_types = {
+        "Radio", "DDC", "DUC", "Replay", "DmaFIFO", "SigGen",
+        "NullSrcSink", "StreamEndpoint", "SEP"
+    };
+    
+    return streamable_types.count(block_type) > 0;
+}
+
+// Check if a specific block/port has a SEP (Stream Endpoint) downstream
+bool has_sep_downstream(uhd::rfnoc::rfnoc_graph::sptr graph,
+                       const std::string& block_id,
+                       size_t port) {
+    try {
+        // Get all edges
+        auto all_edges = graph->enumerate_active_connections();
+        auto static_edges = graph->enumerate_static_connections();
+        all_edges.insert(all_edges.end(), static_edges.begin(), static_edges.end());
+        
+        // Follow the chain downstream
+        std::string current_block = block_id;
+        size_t current_port = port;
+        std::set<std::string> visited;
+        
+        while (true) {
+            std::string key = current_block + ":" + std::to_string(current_port);
+            if (visited.count(key) > 0) break;
+            visited.insert(key);
+            
+            // Check if current block is a SEP
+            if (current_block.find("SEP") != std::string::npos ||
+                current_block.find("StreamEndpoint") != std::string::npos) {
+                return true;
+            }
+            
+            // Find next downstream block
+            bool found = false;
+            for (const auto& edge : all_edges) {
+                if (edge.src_blockid == current_block && edge.src_port == current_port) {
+                    current_block = edge.dst_blockid;
+                    current_port = edge.dst_port;
+                    found = true;
+                    break;
+                }
+            }
+            
+            if (!found) break;
+        }
+        
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Check if a block/port combination can be used for streaming
+bool is_streamable_endpoint(uhd::rfnoc::rfnoc_graph::sptr graph,
+                           const std::string& block_id,
+                           size_t port) {
+    try {
+        uhd::rfnoc::block_id_t bid(block_id);
+        auto block = graph->get_block(bid);
+        
+        if (!block || port >= block->get_num_output_ports()) {
+            return false;
+        }
+        
+        // Check if this is a known streamable block type
+        std::string block_type = bid.get_block_name();
+        if (is_potentially_streamable_block(block_type)) {
+            return true;
+        }
+        
+        // Check if this block has a SEP downstream
+        if (has_sep_downstream(graph, block_id, port)) {
+            return true;
+        }
+        
+        // For other blocks, check if they're terminal (no downstream connections)
+        // and could potentially stream
+        auto all_edges = graph->enumerate_active_connections();
+        auto static_edges = graph->enumerate_static_connections();
+        all_edges.insert(all_edges.end(), static_edges.begin(), static_edges.end());
+        
+        bool has_downstream = false;
+        for (const auto& edge : all_edges) {
+            if (edge.src_blockid == block_id && edge.src_port == port) {
+                has_downstream = true;
+                break;
+            }
+        }
+        
+        // If it's a terminal output, it might be streamable
+        return !has_downstream;
+        
+    } catch (...) {
+        return false;
+    }
+}
+
+// Find the terminal block in a chain (the last block before a SEP)
+std::pair<std::string, size_t> find_terminal_stream_endpoint(
+    uhd::rfnoc::rfnoc_graph::sptr graph,
+    const std::string& start_block_id,
+    size_t start_port) {
+    
+    try {
+        // First check if this block ID is already a SEP - if so, we need to find what connects TO it
+        if (start_block_id.find("SEP") != std::string::npos) {
+            // This is a SEP block, find what connects to it
+            auto all_edges = graph->enumerate_static_connections();
+            auto active_edges = graph->enumerate_active_connections();
+            all_edges.insert(all_edges.end(), active_edges.begin(), active_edges.end());
+            
+            for (const auto& edge : all_edges) {
+                if (edge.dst_blockid == start_block_id && edge.dst_port == start_port) {
+                    // Found the block that connects to this SEP
+                    return {edge.src_blockid, edge.src_port};
+                }
+            }
+            // If we can't find what connects to the SEP, return error
+            throw std::runtime_error("SEP block has no upstream connection");
+        }
+        
+        uhd::rfnoc::block_id_t block_id(start_block_id);
+        auto block = graph->get_block(block_id);
+        
+        if (!block || start_port >= block->get_num_output_ports()) {
+            throw std::runtime_error("Invalid block or port");
+        }
+        
+        // Get all connections (both static and active)
+        auto all_edges = graph->enumerate_active_connections();
+        auto static_edges = graph->enumerate_static_connections();
+        all_edges.insert(all_edges.end(), static_edges.begin(), static_edges.end());
+        
+        // Follow the chain downstream to find the terminal block
+        std::string current_block = start_block_id;
+        size_t current_port = start_port;
+        std::string last_valid_block = start_block_id;
+        size_t last_valid_port = start_port;
+        std::set<std::string> visited;  // Prevent infinite loops
+        
+        while (true) {
+            std::string block_port_key = current_block + ":" + std::to_string(current_port);
+            if (visited.count(block_port_key) > 0) {
+                // Loop detected, return last valid position
+                break;
+            }
+            visited.insert(block_port_key);
+            
+            bool found_downstream = false;
+            for (const auto& edge : all_edges) {
+                if (edge.src_blockid == current_block && edge.src_port == current_port) {
+                    // Check if downstream is a SEP
+                    if (edge.dst_blockid.find("SEP") != std::string::npos) {
+                        // Current block connects to a SEP, so current block is the terminal
+                        return {current_block, current_port};
+                    }
+                    
+                    // Save current as last valid before moving downstream
+                    last_valid_block = current_block;
+                    last_valid_port = current_port;
+                    
+                    // Move to downstream block
+                    current_block = edge.dst_blockid;
+                    current_port = edge.dst_port;
+                    found_downstream = true;
+                    break;
+                }
+            }
+            
+            if (!found_downstream) {
+                // No more downstream connections, this is terminal
+                return {current_block, current_port};
+            }
+        }
+        
+        return {last_valid_block, last_valid_port};
+        
+    } catch (const std::exception& e) {
+        // On error, return the original
+        return {start_block_id, start_port};
+    }
+}
+
+// Also update the find_all_stream_endpoints_comprehensive function to filter out SEPs:
+
+std::vector<std::pair<std::string, size_t>> find_all_stream_endpoints_comprehensive(
+    uhd::rfnoc::rfnoc_graph::sptr graph,
+    const std::vector<StreamEndpointConfig>& configured_endpoints,
+    const MultiStreamConfig& multi_config) {
+    
+    std::vector<std::pair<std::string, size_t>> endpoints;
+    std::set<std::string> processed_endpoints;  // Avoid duplicates
+    
+    // Helper to add unique endpoints (excluding SEPs)
+    auto add_unique_endpoint = [&](const std::string& block_id, size_t port) {
+        // Never add SEP blocks directly
+        if (block_id.find("SEP") != std::string::npos) {
+            return false;
+        }
+        
+        std::string key = block_id + ":" + std::to_string(port);
+        if (processed_endpoints.count(key) == 0) {
+            processed_endpoints.insert(key);
+            endpoints.push_back({block_id, port});
+            return true;
+        }
+        return false;
+    };
+    
+    // First, process explicitly configured endpoints
+    for (const auto& ep : configured_endpoints) {
+        if (ep.enabled && ep.direction == "rx") {
+            auto terminal = find_terminal_stream_endpoint(graph, ep.block_id, ep.port);
+            add_unique_endpoint(terminal.first, terminal.second);
+        }
+    }
+    
+    // Process specifically requested stream blocks
+    if (!multi_config.stream_blocks.empty()) {
+        for (const auto& block_id : multi_config.stream_blocks) {
+            try {
+                // Skip if it's a SEP
+                if (block_id.find("SEP") != std::string::npos) {
+                    continue;
+                }
+                
+                uhd::rfnoc::block_id_t id(block_id);
+                auto block = graph->get_block(id);
+                
+                if (!block) {
+                    std::cerr << "Warning: Configured stream block " << block_id 
+                             << " not found" << std::endl;
+                    continue;
+                }
+                
+                // Check ALL output ports
+                for (size_t port = 0; port < block->get_num_output_ports(); ++port) {
+                    auto terminal = find_terminal_stream_endpoint(graph, block_id, port);
+                    if (add_unique_endpoint(terminal.first, terminal.second)) {
+                        if (multi_config.max_streams > 0 && 
+                            endpoints.size() >= multi_config.max_streams) {
+                            return endpoints;
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Error processing stream block " << block_id 
+                         << ": " << e.what() << std::endl;
+            }
+        }
+    }
+    
+    // Auto-discover ALL potential streaming endpoints if enabled
+    if (multi_config.enable_multi_stream && 
+        (endpoints.empty() || (multi_config.max_streams > 0 && endpoints.size() < multi_config.max_streams))) {
+        
+        // Get all blocks
+        auto block_ids = graph->find_blocks("");
+        
+        // Get all connections to find blocks that connect to SEPs
+        auto all_edges = graph->enumerate_active_connections();
+        auto static_edges = graph->enumerate_static_connections();
+        all_edges.insert(all_edges.end(), static_edges.begin(), static_edges.end());
+        
+        // Find all blocks that have connections to SEPs
+        for (const auto& edge : all_edges) {
+            if (edge.dst_blockid.find("SEP") != std::string::npos) {
+                // This edge connects to a SEP, so the source is streamable
+                if (add_unique_endpoint(edge.src_blockid, edge.src_port)) {
+                    std::cout << "Found streamable endpoint: " << edge.src_blockid 
+                             << ":" << edge.src_port 
+                             << " (connects to " << edge.dst_blockid << ")" << std::endl;
+                    
+                    if (multi_config.max_streams > 0 && 
+                        endpoints.size() >= multi_config.max_streams) {
+                        return endpoints;
+                    }
+                }
+            }
+        }
+        
+        // Also check for blocks that are known to be streamable even without SEPs
+        for (const auto& block_id : block_ids) {
+            try {
+                auto block = graph->get_block(block_id);
+                if (!block) continue;
+                
+                std::string block_id_str = block_id.to_string();
+                
+                // Skip SEP blocks
+                if (block_id_str.find("SEP") != std::string::npos) {
+                    continue;
+                }
+                
+                // Check if it's a known streamable type without SEP
+                if (is_potentially_streamable_block(block_id.get_block_name())) {
+                    for (size_t port = 0; port < block->get_num_output_ports(); ++port) {
+                        // Check if this port is already added or connects to a SEP
+                        bool already_handled = false;
+                        for (const auto& edge : all_edges) {
+                            if (edge.src_blockid == block_id_str && 
+                                edge.src_port == port &&
+                                edge.dst_blockid.find("SEP") != std::string::npos) {
+                                already_handled = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!already_handled) {
+                            if (add_unique_endpoint(block_id_str, port)) {
+                                std::cout << "Found additional streamable endpoint: " 
+                                         << block_id_str << ":" << port << std::endl;
+                                
+                                if (multi_config.max_streams > 0 && 
+                                    endpoints.size() >= multi_config.max_streams) {
+                                    return endpoints;
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                // Skip blocks that cause errors
+                continue;
+            }
+        }
+    }
+    
+    return endpoints;
+}
 
 // Write value as little-endian bytes
 template<typename T>
@@ -2234,7 +2581,7 @@ void capture_multi_stream(
     // Print initial graph state
     print_graph_info(graph);
     
-    // Apply configurations (same as single-stream)
+    // 1. First, just initialize blocks without setting properties
     if (!config.block_init_order.empty()) {
         std::cout << "\nInitializing blocks in specified order..." << std::endl;
         for (const auto& block_id : config.block_init_order) {
@@ -2249,28 +2596,26 @@ void capture_multi_stream(
         }
     }
     
+    // 2. Configure switchboards
     if (!config.switchboard_configs.empty()) {
         std::cout << "\nConfiguring switchboards..." << std::endl;
         configure_switchboards(graph, config.switchboard_configs);
     }
     
+    // 3. Apply dynamic connections
     if (!config.dynamic_connections.empty()) {
         std::cout << "\nApplying dynamic connections..." << std::endl;
         apply_dynamic_connections(graph, config.dynamic_connections, config.commit_after_each_connection);
     }
     
+    // 4. Connect Radio to DDC if needed (but DON'T set rates yet)
     if (config.auto_connect_radio_to_ddc) {
         std::cout << "\nAuto-connecting Radio to DDC..." << std::endl;
         auto_connect_radio_to_ddc(graph);
     }
     
-    if (!config.block_properties.empty()) {
-        std::cout << "\nApplying block properties..." << std::endl;
-        apply_block_properties(graph, config.block_properties, rate);
-    }
-    
-    // Find all streaming endpoints
-    auto endpoints = find_all_stream_endpoints_enhanced(graph, config.stream_endpoints, config.multi_stream);
+    // 5. Find streaming endpoints
+    auto endpoints = find_all_stream_endpoints_comprehensive(graph, config.stream_endpoints, config.multi_stream);
     
     if (endpoints.empty()) {
         throw std::runtime_error("No suitable streaming endpoints found");
@@ -2282,7 +2627,7 @@ void capture_multi_stream(
                   << ":" << endpoints[i].second << std::endl;
     }
     
-    // Get tick rate
+    // 6. Get tick rate from Radio
     double tick_rate = DEFAULT_TICKRATE;
     auto radio_blocks = graph->find_blocks("Radio");
     if (!radio_blocks.empty()) {
@@ -2290,173 +2635,177 @@ void capture_multi_stream(
         tick_rate = radio->get_tick_rate();
     }
     
-    // Create stream contexts
+    // 7. Create output files
     std::vector<StreamContext> contexts;
     std::vector<std::unique_ptr<std::ofstream>> output_files;
     std::unique_ptr<std::mutex> shared_file_mutex;
     std::vector<chdr_packet_data> all_analysis_packets;
     std::mutex analysis_mutex;
     
-    // Open output files
-    if (config.multi_stream.separate_files) {
-        // Separate file for each stream
-        for (size_t i = 0; i < endpoints.size(); ++i) {
-            std::string stream_file = config.multi_stream.file_prefix + "_" + 
-                                     std::to_string(i) + "_" + file;
-            auto file_ptr = std::make_unique<std::ofstream>(stream_file, std::ios::binary);
-            if (!file_ptr->is_open()) {
-                throw std::runtime_error("Failed to open file: " + stream_file);
-            }
-            
-            // Write file header
-            struct {
-                uint32_t magic;
-                uint32_t version;
-                uint32_t chdr_width;
-                double tick_rate;
-                uint32_t stream_id;
-                char block_id[64];
-                uint32_t port;
-            } file_header;
-            
-            file_header.magic = 0x43484452; // "CHDR"
-            file_header.version = 3;  // Version 3 for multi-stream
-            file_header.chdr_width = 64;
-            file_header.tick_rate = tick_rate;
-            file_header.stream_id = i;
-            strncpy(file_header.block_id, endpoints[i].first.c_str(), 63);
-            file_header.block_id[63] = '\0';
-            file_header.port = endpoints[i].second;
-            
-            file_ptr->write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
-            output_files.push_back(std::move(file_ptr));
+// std::vector<std::unique_ptr<std::ofstream>> output_files;
+// std::unique_ptr<std::mutex> shared_file_mutex;   // keep this
+
+if (enable_analysis) {
+    // Decide whether we need one shared CSV or one per stream
+    const bool one_file_per_stream = config.multi_stream.separate_files;
+
+    auto make_name = [&](size_t idx) {
+        if (!one_file_per_stream)          // single shared file
+            return csv_file;
+        // insert _<idx> before the extension (or append .csv)
+        auto dot = csv_file.find_last_of('.');
+        return dot != std::string::npos
+                 ? csv_file.substr(0, dot) + "_" + std::to_string(idx) +
+                   csv_file.substr(dot)
+                 : csv_file + "_" + std::to_string(idx) + ".csv";
+    };
+
+    for (size_t i = 0; i < (one_file_per_stream ? endpoints.size() : 1); ++i) {
+        auto fname = make_name(i);
+        output_files.emplace_back(std::make_unique<std::ofstream>(fname));
+        if (!output_files.back()->is_open()) {
+            throw std::runtime_error("Failed to open analysis file: " + fname);
         }
-    } else {
-        // Single shared file for all streams
-        auto file_ptr = std::make_unique<std::ofstream>(file, std::ios::binary);
-        if (!file_ptr->is_open()) {
-            throw std::runtime_error("Failed to open file: " + file);
-        }
-        
-        // Write file header with multi-stream info
-        struct {
-            uint32_t magic;
-            uint32_t version;
-            uint32_t chdr_width;
-            double tick_rate;
-            uint32_t num_streams;
-        } file_header;
-        
-        file_header.magic = 0x43484452; // "CHDR"
-        file_header.version = 3;  // Version 3 for multi-stream
-        file_header.chdr_width = 64;
-        file_header.tick_rate = tick_rate;
-        file_header.num_streams = endpoints.size();
-        
-        file_ptr->write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
-        
-        // Write stream info
-        for (size_t i = 0; i < endpoints.size(); ++i) {
-            struct {
-                uint32_t stream_id;
-                char block_id[64];
-                uint32_t port;
-            } stream_info;
-            
-            stream_info.stream_id = i;
-            strncpy(stream_info.block_id, endpoints[i].first.c_str(), 63);
-            stream_info.block_id[63] = '\0';
-            stream_info.port = endpoints[i].second;
-            
-            file_ptr->write(reinterpret_cast<const char*>(&stream_info), sizeof(stream_info));
-        }
-        
-        output_files.push_back(std::move(file_ptr));
+    }
+
+    if (!one_file_per_stream) {
+        // different threads will write to the same file
         shared_file_mutex = std::make_unique<std::mutex>();
     }
+}
     
-    // Create streamers and contexts
+    // 8. Create streamers and connect them (following rfnoc_rx_to_file pattern)
+    std::vector<uhd::rfnoc::ddc_block_control::sptr> ddc_controls;
+    std::vector<size_t> ddc_channels;
+    
     for (size_t i = 0; i < endpoints.size(); ++i) {
         const auto& [block_id, port] = endpoints[i];
         
-        // Create stream args
-        uhd::stream_args_t stream_args("fc32", "sc16");
-        stream_args.channels = {0};
-        stream_args.args["spp"] = std::to_string(samps_per_buff);
+        std::cout << "Setting up stream " << i << " for " << block_id << ":" << port << std::endl;
         
-        // Apply custom stream args from config
-        for (const auto& sep : config.stream_endpoints) {
-            if (sep.block_id == block_id && sep.port == port) {
-                for (const auto& [key, value] : sep.stream_args) {
-                    stream_args.args[key] = value;
-                }
-                break;
-            }
-        }
-        
-        // Create RX streamer
-        auto rx_streamer = graph->create_rx_streamer(1, stream_args);
-        
-        // Find the block chain and connect through all blocks
         try {
-            // First check if we need to trace back from the endpoint
-            uhd::rfnoc::block_id_t endpoint_block_id(block_id);
+            // Find the radio source for this endpoint
+            uhd::rfnoc::block_id_t endpoint_id(block_id);
             
-            // Try to get the block chain
-            auto reverse_edges = uhd::rfnoc::get_block_chain(
-                graph, endpoint_block_id, port, false);  // false = search upstream
-            
-            if (!reverse_edges.empty()) {
-                // We have upstream blocks, need to connect through them
-                uhd::rfnoc::connect_through_blocks(
-                    graph,
-                    reverse_edges.back().dst_blockid,
-                    reverse_edges.back().dst_port,
-                    endpoint_block_id,
-                    port);
+            if (endpoint_id.get_block_name() == "DDC" && (port == 0 || port == 1)) {
+                // For DDC ports 0 and 1, trace back to Radio
+                uhd::rfnoc::block_id_t radio_id = radio_blocks[0];
+                size_t radio_port = port; // DDC port 0 <- Radio port 0, DDC port 1 <- Radio port 1
+                
+                // Get the block chain from radio to endpoint
+                auto edges = uhd::rfnoc::get_block_chain(graph, radio_id, radio_port, true);
+                
+                if (!edges.empty()) {
+                    // Find the last block in chain
+                    std::string last_block = edges.back().src_blockid;
+                    size_t last_port = edges.back().src_port;
+                    
+                    // Connect through all blocks
+                    uhd::rfnoc::connect_through_blocks(
+                        graph, 
+                        radio_id.to_string(), radio_port,
+                        last_block, last_port);
+                    
+                    // Store DDC control for later rate setting
+                    auto ddc_ctrl = graph->get_block<uhd::rfnoc::ddc_block_control>(endpoint_id);
+                    if (ddc_ctrl) {
+                        ddc_controls.push_back(ddc_ctrl);
+                        ddc_channels.push_back(port);
+                    }
+                }
             }
             
-            // Now connect the streamer
+            // Create stream args
+            uhd::stream_args_t stream_args("fc32", "sc16");
+            stream_args.channels = {0};
+            stream_args.args = uhd::device_addr_t();
+            
+            // Apply stream args from config
+            for (const auto& sep : config.stream_endpoints) {
+                if (sep.block_id == block_id && sep.port == port) {
+                    for (const auto& [key, value] : sep.stream_args) {
+                        stream_args.args[key] = value;
+                    }
+                    break;
+                }
+            }
+            
+            // Create RX streamer
+            auto rx_streamer = graph->create_rx_streamer(1, stream_args);
+            
+            // Connect streamer to endpoint
             graph->connect(block_id, port, rx_streamer, 0);
             
+            std::cout << "  Connected RX streamer" << std::endl;
+            
+            // Create context
+            StreamContext ctx;
+            ctx.stream_id = i;
+            ctx.block_id = block_id;
+            ctx.port = port;
+            ctx.rx_streamer = rx_streamer;
+            ctx.output_file = config.multi_stream.separate_files ? 
+                             output_files[i].get() : output_files[0].get();
+            ctx.file_mutex = config.multi_stream.separate_files ? 
+                            nullptr : shared_file_mutex.get();
+            ctx.stats.stream_id = i;
+            ctx.stats.block_id = block_id;
+            ctx.stats.port = port;
+            ctx.analysis_packets = enable_analysis ? &all_analysis_packets : nullptr;
+            ctx.analysis_mutex = &analysis_mutex;
+            ctx.tick_rate = tick_rate;
+            ctx.samps_per_buff = samps_per_buff;
+            ctx.separate_file = config.multi_stream.separate_files;
+            
+            contexts.push_back(ctx);
+            
         } catch (const std::exception& e) {
-            std::cerr << "Warning: Could not establish full chain for " 
-                      << block_id << ":" << port << " - " << e.what() << std::endl;
-            // Try direct connection as fallback
-            try {
-                graph->connect(block_id, port, rx_streamer, 0);
-            } catch (const std::exception& e2) {
-                std::cerr << "Error: Failed to connect streamer to " 
-                          << block_id << ":" << port << " - " << e2.what() << std::endl;
-                continue;  // Skip this endpoint
-            }
+            std::cerr << "Failed to setup stream " << i << ": " << e.what() << std::endl;
         }
-        
-        // Create context
-        StreamContext ctx;
-        ctx.stream_id = i;
-        ctx.block_id = block_id;
-        ctx.port = port;
-        ctx.rx_streamer = rx_streamer;
-        ctx.output_file = config.multi_stream.separate_files ? 
-                         output_files[i].get() : output_files[0].get();
-        ctx.file_mutex = config.multi_stream.separate_files ? 
-                        nullptr : shared_file_mutex.get();
-        ctx.stats.stream_id = i;
-        ctx.stats.block_id = block_id;
-        ctx.stats.port = port;
-        ctx.analysis_packets = enable_analysis ? &all_analysis_packets : nullptr;
-        ctx.analysis_mutex = &analysis_mutex;
-        ctx.tick_rate = tick_rate;
-        ctx.samps_per_buff = samps_per_buff;
-        ctx.separate_file = config.multi_stream.separate_files;
-        
-        contexts.push_back(ctx);
     }
     
-    // Commit graph changes
+    // 9. COMMIT THE GRAPH BEFORE SETTING PROPERTIES
     std::cout << "\nCommitting graph..." << std::endl;
     graph->commit();
+    
+    // 10. NOW set block properties (especially sample rates) AFTER commit
+    std::cout << "\nSetting block properties after commit..." << std::endl;
+    
+    // Set Radio properties first
+    if (!radio_blocks.empty()) {
+        auto radio = graph->get_block<uhd::rfnoc::radio_control>(radio_blocks[0]);
+        if (radio && config.block_properties.find("0/Radio#0") != config.block_properties.end()) {
+            auto& props = config.block_properties.at("0/Radio#0");
+            
+            // Set radio rate
+            if (props.find("rate") != props.end()) {
+                radio->set_rate(std::stod(props.at("rate")));
+            }
+            
+            // Set other radio properties
+            for (size_t chan = 0; chan < radio->get_num_output_ports(); ++chan) {
+                if (props.find("freq/" + std::to_string(chan)) != props.end()) {
+                    radio->set_rx_frequency(std::stod(props.at("freq/" + std::to_string(chan))), chan);
+                }
+                if (props.find("gain/" + std::to_string(chan)) != props.end()) {
+                    radio->set_rx_gain(std::stod(props.at("gain/" + std::to_string(chan))), chan);
+                }
+                if (props.find("antenna/" + std::to_string(chan)) != props.end()) {
+                    radio->set_rx_antenna(props.at("antenna/" + std::to_string(chan)), chan);
+                }
+            }
+        }
+    }
+    
+    // Set DDC output rates AFTER commit (like rfnoc_rx_to_file does)
+    for (size_t i = 0; i < ddc_controls.size(); ++i) {
+        auto ddc = ddc_controls[i];
+        size_t chan = ddc_channels[i];
+        
+        std::cout << "Setting DDC output rate for channel " << chan << " to " << rate << " Hz" << std::endl;
+        double actual_rate = ddc->set_output_rate(rate, chan);
+        std::cout << "  Actual rate: " << actual_rate << " Hz" << std::endl;
+    }
     
     // Print final graph state
     std::cout << "\n=== Final Graph State ===" << std::endl;
