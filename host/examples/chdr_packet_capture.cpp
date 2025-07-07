@@ -16,6 +16,8 @@
 
 #include <uhd/exception.hpp>
 #include <uhd/rfnoc_graph.hpp>
+#include <uhd/utils/graph_utils.hpp>
+#include <uhd/rfnoc/graph_edge.hpp>
 #include <uhd/rfnoc/noc_block_base.hpp>
 #include <uhd/rfnoc/radio_control.hpp>
 #include <uhd/rfnoc/ddc_block_control.hpp>
@@ -566,6 +568,7 @@ done_discovering:
     
     return valid_endpoints;
 }
+
 
 // Function to generate example connections based on discovered topology
 std::vector<ConnectionConfig> suggest_connections(const GraphTopology& topology) {
@@ -1243,10 +1246,7 @@ std::vector<std::pair<std::string, size_t>> detect_stream_endpoints(
 
 // Forward declarations
 bool auto_connect_radio_to_ddc(uhd::rfnoc::rfnoc_graph::sptr graph);
-std::vector<std::pair<std::string, size_t>> find_all_stream_endpoints(
-    uhd::rfnoc::rfnoc_graph::sptr graph,
-    const std::vector<StreamEndpointConfig>& configured_endpoints,
-    const MultiStreamConfig& multi_config);
+
 
 // Write value as little-endian bytes
 template<typename T>
@@ -1464,82 +1464,129 @@ GraphConfig load_graph_config(const std::string& yaml_file) {
 }
 
 
-
-
 // Find ALL available streaming endpoints for multi-stream support
-std::vector<std::pair<std::string, size_t>> find_all_stream_endpoints(uhd::rfnoc::rfnoc_graph::sptr graph,
-                                                                      const std::vector<StreamEndpointConfig>& configured_endpoints,
-                                                                      const MultiStreamConfig& multi_config)
-{    
+/*std::vector<std::pair<std::string, size_t>> find_all_stream_endpoints_enhanced(
+    uhd::rfnoc::rfnoc_graph::sptr graph,
+    const std::vector<StreamEndpointConfig>& configured_endpoints,
+    const MultiStreamConfig& multi_config) {
+    
     std::vector<std::pair<std::string, size_t>> endpoints;
+    
+    // First, check explicitly configured endpoints
     for (const auto& ep : configured_endpoints) {
         if (ep.enabled && ep.direction == "rx") {
-            endpoints.push_back({ep.block_id, ep.port});
-        }
-    }
-    
-    // If we have specific stream blocks configured, add those
-    if (!multi_config.stream_blocks.empty()) {
-        for (const auto& block_id : multi_config.stream_blocks) {
-            // Check if already in endpoints
-            bool already_added = false;
-            for (const auto& [bid, port] : endpoints) {
-                if (bid == block_id) {
-                    already_added = true;
-                    break;
-                }
-            }
-            if (!already_added) {
-                endpoints.push_back({block_id, 0});
-            }
-        }
-    }
-    
-    // Auto-discover endpoints if enabled
-    if (multi_config.enable_multi_stream && endpoints.empty()) {
-        auto blocks = discover_blocks(graph);
-        
-        // Priority order for multi-stream endpoints
-        std::vector<std::string> priority_order = {
-            "DDC", "Radio", "Replay", "DmaFIFO", "SigGen", "DUC"
-        };
-        
-        // Find all DDC blocks first (most common multi-stream scenario)
-        for (const auto& block_type : priority_order) {
-            for (const auto& block : blocks) {
-                if (block.block_type == block_type && block.has_stream_endpoint) {
-                    // For DDC blocks, check all output ports
-                    if (block_type == "DDC") {
-                        for (size_t port = 0; port < block.num_output_ports; ++port) {
-                            // Check if this DDC output is not connected downstream
-                            auto edges = graph->enumerate_active_connections();
-                            bool has_downstream = false;
-                            for (const auto& edge : edges) {
-                                if (edge.src_blockid == block.block_id && edge.src_port == port) {
-                                    has_downstream = true;
-                                    break;
-                                }
-                            }
-                            
-                            if (!has_downstream) {
-                                endpoints.push_back(std::make_pair(block.block_id, port));
-                            }
-                        }
+            // For each configured endpoint, find the actual last block in chain
+            try {
+                uhd::rfnoc::block_id_t block_id(ep.block_id);
+                if (graph->has_block(block_id)) {
+                    // Get the block chain starting from this block
+                    auto edges = uhd::rfnoc::get_block_chain(graph, block_id, ep.port, true);
+                    if (!edges.empty()) {
+                        // The last edge's source is what we can actually connect to
+                        endpoints.push_back({edges.back().src_blockid, edges.back().src_port});
                     } else {
-                        endpoints.push_back({block.block_id, 0});
+                        // No chain, so this block itself is the endpoint
+                        endpoints.push_back({ep.block_id, ep.port});
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Could not process endpoint " << ep.block_id 
+                         << ": " << e.what() << std::endl;
+            }
+        }
+    }
+    
+    // If we have specific stream blocks configured, process those
+    if (!multi_config.stream_blocks.empty()) {
+        for (const auto& block_id_str : multi_config.stream_blocks) {
+            try {
+                uhd::rfnoc::block_id_t block_id(block_id_str);
+                if (!graph->has_block(block_id)) {
+                    std::cerr << "Warning: Configured stream block " << block_id_str 
+                             << " not found" << std::endl;
+                    continue;
+                }
+                
+                auto block = graph->get_block(block_id);
+                size_t num_ports = block->get_num_output_ports();
+                
+                // Check each output port
+                for (size_t port = 0; port < num_ports; ++port) {
+                    // Get the block chain from this port
+                    auto edges = uhd::rfnoc::get_block_chain(graph, block_id, port, true);
+                    
+                    std::string actual_block_id = block_id_str;
+                    size_t actual_port = port;
+                    
+                    if (!edges.empty()) {
+                        // Use the last block in the chain
+                        actual_block_id = edges.back().src_blockid;
+                        actual_port = edges.back().src_port;
+                    }
+                    
+                    // Check if already added
+                    bool already_added = false;
+                    for (const auto& [bid, p] : endpoints) {
+                        if (bid == actual_block_id && p == actual_port) {
+                            already_added = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!already_added) {
+                        endpoints.push_back({actual_block_id, actual_port});
+                        
+                        // Check if we've reached max_streams
+                        if (multi_config.max_streams > 0 && 
+                            endpoints.size() >= multi_config.max_streams) {
+                            return endpoints;
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Error processing stream block " << block_id_str 
+                         << ": " << e.what() << std::endl;
+            }
+        }
+    }
+    
+    // Auto-discover if needed
+    if (multi_config.enable_multi_stream && endpoints.empty()) {
+        // Find all blocks that could be endpoints
+        auto blocks = discover_blocks_enhanced(graph);
+        
+        for (const auto& block : blocks) {
+            if (block.block_type == "Radio" || block.block_type == "DDC" || 
+                block.block_type == "DUC" || block.block_type == "Replay" ||
+                block.block_type == "DmaFIFO" || block.block_type == "SigGen") {
+                
+                for (size_t port = 0; port < block.num_output_ports; ++port) {
+                    try {
+                        // Get the chain from this block/port
+                        uhd::rfnoc::block_id_t bid(block.block_id);
+                        auto edges = uhd::rfnoc::get_block_chain(graph, bid, port, true);
+                        
+                        if (!edges.empty()) {
+                            endpoints.push_back({edges.back().src_blockid, edges.back().src_port});
+                        } else {
+                            endpoints.push_back({block.block_id, port});
+                        }
+                        
+                        if (multi_config.max_streams > 0 && 
+                            endpoints.size() >= multi_config.max_streams) {
+                            return endpoints;
+                        }
+                    } catch (...) {
+                        // Skip ports that can't be used
                     }
                 }
             }
         }
     }
     
-    // Apply max_streams limit if specified
-    if (multi_config.max_streams > 0 && endpoints.size() > multi_config.max_streams) {
-        endpoints.resize(multi_config.max_streams);
-    }
-    
     return endpoints;
 }
+*/
 
 // Apply block properties for all RFNoC block types
 bool apply_block_properties(uhd::rfnoc::rfnoc_graph::sptr graph,
@@ -2223,7 +2270,7 @@ void capture_multi_stream(
     }
     
     // Find all streaming endpoints
-    auto endpoints = find_all_stream_endpoints(graph, config.stream_endpoints, config.multi_stream);
+    auto endpoints = find_all_stream_endpoints_enhanced(graph, config.stream_endpoints, config.multi_stream);
     
     if (endpoints.empty()) {
         throw std::runtime_error("No suitable streaming endpoints found");
@@ -2350,8 +2397,40 @@ void capture_multi_stream(
         // Create RX streamer
         auto rx_streamer = graph->create_rx_streamer(1, stream_args);
         
-        // Connect to the streaming block
-        graph->connect(block_id, port, rx_streamer, 0);
+        // Find the block chain and connect through all blocks
+        try {
+            // First check if we need to trace back from the endpoint
+            uhd::rfnoc::block_id_t endpoint_block_id(block_id);
+            
+            // Try to get the block chain
+            auto reverse_edges = uhd::rfnoc::get_block_chain(
+                graph, endpoint_block_id, port, false);  // false = search upstream
+            
+            if (!reverse_edges.empty()) {
+                // We have upstream blocks, need to connect through them
+                uhd::rfnoc::connect_through_blocks(
+                    graph,
+                    reverse_edges.back().dst_blockid,
+                    reverse_edges.back().dst_port,
+                    endpoint_block_id,
+                    port);
+            }
+            
+            // Now connect the streamer
+            graph->connect(block_id, port, rx_streamer, 0);
+            
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Could not establish full chain for " 
+                      << block_id << ":" << port << " - " << e.what() << std::endl;
+            // Try direct connection as fallback
+            try {
+                graph->connect(block_id, port, rx_streamer, 0);
+            } catch (const std::exception& e2) {
+                std::cerr << "Error: Failed to connect streamer to " 
+                          << block_id << ":" << port << " - " << e2.what() << std::endl;
+                continue;  // Skip this endpoint
+            }
+        }
         
         // Create context
         StreamContext ctx;
