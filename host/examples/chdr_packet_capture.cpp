@@ -2683,11 +2683,13 @@ if (enable_analysis) {
         
         std::cout << "Setting up stream " << i << " for " << block_id << ":" << port << std::endl;
         
+        std::cout << "Assuming Radio0 as the first block for testing purposes, this will need to change." <<std::endl;
+
         try {
             // Find the radio source for this endpoint
             uhd::rfnoc::block_id_t endpoint_id(block_id);
             
-            if (endpoint_id.get_block_name() == "DDC" && (port == 0 || port == 1)) {
+            if (endpoint_id.get_block_name() == "DDC" ) {
                 // For DDC ports 0 and 1, trace back to Radio
                 uhd::rfnoc::block_id_t radio_id = radio_blocks[0];
                 size_t radio_port = port; // DDC port 0 <- Radio port 0, DDC port 1 <- Radio port 1
@@ -2716,7 +2718,7 @@ if (enable_analysis) {
             }
             
             // Create stream args
-            uhd::stream_args_t stream_args("fc32", "sc16");
+            uhd::stream_args_t stream_args("sc16", "sc16");
             stream_args.channels = {0};
             stream_args.args = uhd::device_addr_t();
             
@@ -2724,11 +2726,14 @@ if (enable_analysis) {
             for (const auto& sep : config.stream_endpoints) {
                 if (sep.block_id == block_id && sep.port == port) {
                     for (const auto& [key, value] : sep.stream_args) {
+                        std::cout << "**** Here are the stream args for key: " << key << " with value: " << value <<std::endl;
                         stream_args.args[key] = value;
                     }
                     break;
                 }
             }
+
+            
             
             // Create RX streamer
             auto rx_streamer = graph->create_rx_streamer(1, stream_args);
@@ -2910,6 +2915,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     
     // Setup program options
     po::options_description desc("Allowed options");
+    
     desc.add_options()
         ("help", "help message")
         ("args", po::value<std::string>(&args)->default_value(""), "UHD device arguments")
@@ -2927,6 +2933,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("analyze-only", po::value<bool>(&analyze_only)->default_value(false), "only analyze existing file")
         ("create-yaml-template", po::value<bool>(&create_yaml_template)->default_value(false), "create YAML template")
         ("multi-stream", po::value<bool>(&multi_stream)->default_value(false), "enable multi-stream capture")
+        ("dev", po::value<bool>(&multi_stream)->default_value(true), "enable dev mode, where 1st block is assumed to be Radio0")
     ;
     
     po::variables_map vm;
