@@ -74,7 +74,7 @@ using namespace std::chrono_literals;
 
 // Global flag for Ctrl+C handling
 static volatile bool stop_signal_called = false;
-
+void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph);
 void sig_int_handler(int)
 {
     stop_signal_called = true;
@@ -1785,8 +1785,8 @@ GraphConfig load_graph_config(const std::string& yaml_file) {
         
         // Load auto-connect settings
         if (root["auto_connect"]) {
-            config.auto_connect_radio_to_ddc = root["auto_connect"]["radio_to_ddc"].as<bool>(true);
-            config.auto_find_stream_endpoint = root["auto_connect"]["find_stream_endpoint"].as<bool>(true);
+            config.auto_connect_radio_to_ddc = root["auto_connect"]["radio_to_ddc"].as<bool>(false);
+            config.auto_find_stream_endpoint = root["auto_connect"]["find_stream_endpoint"].as<bool>(false);
         }
         
         // Load advanced options
@@ -1935,7 +1935,7 @@ GraphConfig load_graph_config(const std::string& yaml_file) {
 }
 */
 
-// Apply block properties for all RFNoC block types
+/*// Apply block properties for all RFNoC block types
 bool apply_block_properties(uhd::rfnoc::rfnoc_graph::sptr graph,
                            const std::map<std::string, std::map<std::string, std::string>>& properties,
                            double default_rate = 1e6) {
@@ -2073,7 +2073,7 @@ bool apply_block_properties(uhd::rfnoc::rfnoc_graph::sptr graph,
         }
     }
     return true;
-}
+}*/
 
 // Configure switchboards from configuration
 bool configure_switchboards(uhd::rfnoc::rfnoc_graph::sptr graph,
@@ -2094,11 +2094,24 @@ bool configure_switchboards(uhd::rfnoc::rfnoc_graph::sptr graph,
                 switchboard->connect(input, output);
                 std::cout << "  Connected input " << input << " to output " << output << std::endl;
             }
+        // std::cout << "\nJust to see what the connections are right now after configuring " << config.block_id << std::endl;
+        
+        // graph->commit();
+
+        // std::cout << "\nActive connections:" << std::endl;
+        // auto active_edges = graph->enumerate_active_connections();
+        // for (const auto& edge : active_edges) {
+        //     std::cout << "  * " << edge.to_string() << std::endl;
+        // }
+
         } catch (const uhd::exception& e) {
             std::cerr << "Failed to configure switchboard: " << e.what() << std::endl;
             return false;
         }
     }
+    
+    
+
     return true;
 }
 
@@ -2402,6 +2415,90 @@ void analyze_packets(const std::vector<chdr_packet_data>& packets,
     std::cout << "Analysis complete. Results written to: " << csv_file << std::endl;
 }
 
+// Enhanced connection establishment function
+void establish_signal_paths(uhd::rfnoc::rfnoc_graph::sptr graph,
+                          const GraphConfig& config,
+                          const std::vector<std::pair<std::string, size_t>>& endpoints) {
+    
+    std::cout << "\nEstablishing signal paths..." << std::endl;
+    
+    // Process each endpoint to ensure complete path from source
+    for (const auto& [endpoint_block, endpoint_port] : endpoints) {
+        uhd::rfnoc::block_id_t endpoint_id(endpoint_block);
+        
+        // Only process DDC endpoints for now (extend as needed)
+        if (endpoint_id.get_block_name() != "DDC") {
+            continue;
+        }
+        
+        // Build the complete path based on static connections
+        auto static_conns = graph->enumerate_static_connections();
+        std::vector<uhd::rfnoc::graph_edge_t> path;
+        
+        // Trace backwards from endpoint to find source
+        std::string current_block = endpoint_block;
+        size_t current_port = endpoint_port;
+        std::set<std::string> visited;  // Prevent loops
+        
+        while (true) {
+            std::string key = current_block + ":" + std::to_string(current_port);
+            if (visited.count(key) > 0) break;
+            visited.insert(key);
+            
+            bool found_upstream = false;
+            for (const auto& conn : static_conns) {
+                if (conn.dst_blockid == current_block && conn.dst_port == current_port) {
+                    path.push_back(conn);
+                    current_block = conn.src_blockid;
+                    current_port = conn.src_port;
+                    found_upstream = true;
+                    break;
+                }
+            }
+            
+            if (!found_upstream) break;
+            
+            // Stop at Radio (our typical source)
+            uhd::rfnoc::block_id_t current_id(current_block);
+            if (current_id.get_block_name() == "Radio") {
+                break;
+            }
+        }
+        
+        // Now establish connections forward along the path
+        if (!path.empty()) {
+            std::reverse(path.begin(), path.end());  // Make it source->destination order
+            
+            std::cout << "  Path for " << endpoint_block << ":" << endpoint_port << ":" << std::endl;
+            for (const auto& edge : path) {
+                try {
+                    // Check if connection already exists
+                    auto active_conns = graph->enumerate_active_connections();
+                    bool exists = false;
+                    for (const auto& active : active_conns) {
+                        if (active.src_blockid == edge.src_blockid &&
+                            active.src_port == edge.src_port &&
+                            active.dst_blockid == edge.dst_blockid &&
+                            active.dst_port == edge.dst_port) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!exists) {
+                        std::cout << "    Connecting: " << edge.src_blockid << ":" << edge.src_port
+                                 << " -> " << edge.dst_blockid << ":" << edge.dst_port << std::endl;
+                        graph->connect(edge.src_blockid, edge.src_port,
+                                      edge.dst_blockid, edge.dst_port);
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "    Failed to connect: " << e.what() << std::endl;
+                }
+            }
+        }
+    }
+}
+
 // Per-stream capture function
 template <typename samp_type>
 void capture_stream(StreamContext& ctx, 
@@ -2626,6 +2723,8 @@ void capture_multi_stream(
         std::cout << "  Stream " << i << ": " << endpoints[i].first 
                   << ":" << endpoints[i].second << std::endl;
     }
+
+    
     
     // 6. Get tick rate from Radio
     double tick_rate = DEFAULT_TICKRATE;
@@ -2677,43 +2776,96 @@ if (enable_analysis) {
     // 8. Create streamers and connect them (following rfnoc_rx_to_file pattern)
     std::vector<uhd::rfnoc::ddc_block_control::sptr> ddc_controls;
     std::vector<size_t> ddc_channels;
+
+    // establish_signal_paths(graph, config, endpoints);
+    std::cout << "Making manual bespoke connections, lets see" <<std::endl;
+    try {
+        // Connect Radio to DDC explicitly through the chain
+        // This tells the graph about the data path
+        graph->connect(uhd::rfnoc::block_id_t("0/Radio#0"), 0, uhd::rfnoc::block_id_t("0/Switchboard#0"), 0, false);
+        graph->connect(uhd::rfnoc::block_id_t("0/Switchboard#0"), 1, uhd::rfnoc::block_id_t("0/SplitStream#1"), 0, false);
+        graph->connect(uhd::rfnoc::block_id_t("0/SplitStream#1"), 0, uhd::rfnoc::block_id_t("0/Switchboard#1"), 2, false);
+        graph->connect(uhd::rfnoc::block_id_t("0/SplitStream#1"), 1, uhd::rfnoc::block_id_t("0/Switchboard#1"), 3, false);
+        graph->connect(uhd::rfnoc::block_id_t("0/SplitStream#1"), 2, uhd::rfnoc::block_id_t("0/Switchboard#1"), 4, false);
+        graph->connect(uhd::rfnoc::block_id_t("0/SplitStream#1"), 3, uhd::rfnoc::block_id_t("0/Switchboard#1"), 5, false);
+        graph->connect(uhd::rfnoc::block_id_t("0/Switchboard#1"), 0, uhd::rfnoc::block_id_t("0/DDC#0"), 0, false); // true = is_back_edge
+        graph->connect(uhd::rfnoc::block_id_t("0/Switchboard#1"), 1, uhd::rfnoc::block_id_t("0/DDC#0"), 1, false);
+        graph->connect(uhd::rfnoc::block_id_t("0/Switchboard#1"), 2, uhd::rfnoc::block_id_t("0/DDC#0"), 2, false);
+        graph->connect(uhd::rfnoc::block_id_t("0/Switchboard#1"), 3, uhd::rfnoc::block_id_t("0/DDC#0"), 3, false);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to connect ddcs to radio: " << e.what() << std::endl;
+    }
     
     for (size_t i = 0; i < endpoints.size(); ++i) {
         const auto& [block_id, port] = endpoints[i];
         
         std::cout << "Setting up stream " << i << " for " << block_id << ":" << port << std::endl;
         
-        std::cout << "Assuming Radio0 as the first block for testing purposes, this will need to change." <<std::endl;
-
         try {
-            // Find the radio source for this endpoint
             uhd::rfnoc::block_id_t endpoint_id(block_id);
             
-            if (endpoint_id.get_block_name() == "DDC" ) {
-                // For DDC ports 0 and 1, trace back to Radio
-                uhd::rfnoc::block_id_t radio_id = radio_blocks[0];
-                size_t radio_port = port; // DDC port 0 <- Radio port 0, DDC port 1 <- Radio port 1
+            // Check if this endpoint actually exists with the specified port
+            auto endpoint_block = graph->get_block(endpoint_id);
+            if (!endpoint_block || port >= endpoint_block->get_num_output_ports()) {
+                std::cerr << "Warning: " << block_id << " port " << port 
+                        << " doesn't exist in current FPGA image" << std::endl;
+                continue;
+            }
+            
+            // Detect if we have switchboards in this image
+            bool has_switchboards = !graph->find_blocks("Switchboard").empty();
+            
+            // For DDC endpoints, handle based on architecture
+            if (endpoint_id.get_block_name() == "DDC") {
+                // Check if there's a direct Radio→DDC connection in static connections
+                bool has_direct_radio_connection = false;
+                auto static_conns = graph->enumerate_static_connections();
                 
-                // Get the block chain from radio to endpoint
-                auto edges = uhd::rfnoc::get_block_chain(graph, radio_id, radio_port, true);
-                
-                if (!edges.empty()) {
-                    // Find the last block in chain
-                    std::string last_block = edges.back().src_blockid;
-                    size_t last_port = edges.back().src_port;
-                    
-                    // Connect through all blocks
-                    uhd::rfnoc::connect_through_blocks(
-                        graph, 
-                        radio_id.to_string(), radio_port,
-                        last_block, last_port);
-                    
-                    // Store DDC control for later rate setting
-                    auto ddc_ctrl = graph->get_block<uhd::rfnoc::ddc_block_control>(endpoint_id);
-                    if (ddc_ctrl) {
-                        ddc_controls.push_back(ddc_ctrl);
-                        ddc_channels.push_back(port);
+                for (const auto& conn : static_conns) {
+                    if (conn.dst_blockid == block_id && conn.dst_port == port) {
+                        // Check if source is a Radio
+                        uhd::rfnoc::block_id_t src_id(conn.src_blockid);
+                        if (src_id.get_block_name() == "Radio") {
+                            has_direct_radio_connection = true;
+                            break;
+                        }
                     }
+                }
+                
+                // If we have direct Radio→DDC connections and no switchboards, 
+                // we need to establish the connection path
+                if (has_direct_radio_connection && !has_switchboards) {
+                    // Find which radio connects to this DDC port
+                    std::string radio_block_id;
+                    size_t radio_port = 0;
+                    
+                    for (const auto& conn : static_conns) {
+                        if (conn.dst_blockid == block_id && conn.dst_port == port) {
+                            uhd::rfnoc::block_id_t src_id(conn.src_blockid);
+                            if (src_id.get_block_name() == "Radio") {
+                                radio_block_id = conn.src_blockid;
+                                radio_port = conn.src_port;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!radio_block_id.empty()) {
+                        // Connect through the static path
+                        std::cout << "  Connecting through Radio path: " << radio_block_id 
+                                << ":" << radio_port << " -> " << block_id << ":" << port << std::endl;
+                        
+                        // Use connect_through_blocks for direct connections
+                        uhd::rfnoc::connect_through_blocks(
+                            graph,
+                            radio_block_id, radio_port,
+                            block_id, port);
+                    }
+                }
+                // For switchboard-based architectures, the routing is already configured
+                else if (has_switchboards) {
+                    std::cout << "  Using pre-configured switchboard routing for " 
+                            << block_id << ":" << port << std::endl;
                 }
             }
             
@@ -2726,21 +2878,33 @@ if (enable_analysis) {
             for (const auto& sep : config.stream_endpoints) {
                 if (sep.block_id == block_id && sep.port == port) {
                     for (const auto& [key, value] : sep.stream_args) {
-                        std::cout << "**** Here are the stream args for key: " << key << " with value: " << value <<std::endl;
                         stream_args.args[key] = value;
                     }
                     break;
                 }
             }
-
-            
             
             // Create RX streamer
             auto rx_streamer = graph->create_rx_streamer(1, stream_args);
             
             // Connect streamer to endpoint
-            graph->connect(block_id, port, rx_streamer, 0);
+            graph->connect(block_id, port, rx_streamer, 0, true);
             
+            std::cout << "  Connected RX streamer to " << block_id << ":" << port << std::endl;
+            
+            // Store DDC control for later rate setting
+            if (endpoint_id.get_block_name() == "DDC") {
+                auto ddc_ctrl = graph->get_block<uhd::rfnoc::ddc_block_control>(endpoint_id);
+                if (ddc_ctrl) {
+                    ddc_controls.push_back(ddc_ctrl);
+                    ddc_channels.push_back(port);
+                }
+            }
+            
+
+            
+            
+
             std::cout << "  Connected RX streamer" << std::endl;
             
             // Create context
@@ -2768,7 +2932,7 @@ if (enable_analysis) {
             std::cerr << "Failed to setup stream " << i << ": " << e.what() << std::endl;
         }
     }
-    
+
     // 9. COMMIT THE GRAPH BEFORE SETTING PROPERTIES
     std::cout << "\nCommitting graph..." << std::endl;
     graph->commit();
