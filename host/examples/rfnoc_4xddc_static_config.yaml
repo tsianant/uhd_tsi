@@ -1,0 +1,276 @@
+# RFNoC Graph Configuration Template
+# Auto-generated based on FPGA image
+# Device: X-Series Device
+# Generated: 2025-07-07 14:50:03 UTC
+
+# Multi-stream configuration (multiple streaming endpoints detected)
+multi_stream:
+  enable: true
+  sync_streams: true
+  separate_files: false
+  file_prefix: "stream"
+  max_streams: 0
+  sync_delay: 0.1
+  stream_blocks:
+    - "0/DDC#0"  # Port 0
+    - "0/DDC#0"  # Port 1
+    - "0/DDC#0"  # Port 2
+    - "0/DDC#0"  # Port 3
+
+# Static connections (hardcoded in FPGA image)
+# These connections cannot be changed at runtime
+static_connections:
+  # 0/DDC#0:0 -> 0/SEP#0:0
+  # 0/DDC#0:1 -> 0/SEP#1:0
+  # 0/DDC#0:2 -> 0/SEP#2:0
+  # 0/DDC#0:3 -> 0/SEP#3:0
+  # 0/Radio#0:0 -> 0/Switchboard#0:0
+  # 0/Radio#0:1 -> 0/Switchboard#1:1
+  # 0/SigGen#0:0 -> 0/SplitStream#0:0
+  # 0/SigGen#1:0 -> 0/AddSub#0:1
+  # 0/SplitStream#0:0 -> 0/Switchboard#0:2
+  # 0/SplitStream#0:1 -> 0/AddSub#0:0
+  # 0/AddSub#0:0 -> 0/Switchboard#0:1
+  # 0/Switchboard#0:0 -> 0/Switchboard#1:0
+  # 0/Switchboard#0:1 -> 0/SplitStream#1:0
+  # 0/Switchboard#0:2 -> 0/NullSrcSink#0:0
+  # 0/SplitStream#1:0 -> 0/Switchboard#1:2
+  # 0/SplitStream#1:1 -> 0/Switchboard#1:3
+  # 0/SplitStream#1:2 -> 0/Switchboard#1:4
+  # 0/SplitStream#1:3 -> 0/Switchboard#1:5
+  # 0/Switchboard#1:0 -> 0/DDC#0:0
+  # 0/Switchboard#1:1 -> 0/DDC#0:1
+  # 0/Switchboard#1:2 -> 0/DDC#0:2
+  # 0/Switchboard#1:3 -> 0/DDC#0:3
+  # 0/Switchboard#1:4 -> 0/NullSrcSink#1:0
+  # 0/Switchboard#1:5 -> 0/NullSrcSink#2:0
+  # 0/NullSrcSink#0:0 -> 0/SEP#4:0
+  # 0/NullSrcSink#1:0 -> 0/SEP#5:0
+  # 0/NullSrcSink#2:0 -> 0/SEP#6:0
+  # 0/NullSrcSink#0:1 -> 0/SEP#7:0
+  # 0/NullSrcSink#1:1 -> 0/SEP#8:0
+  # 0/NullSrcSink#2:1 -> 0/SEP#9:0
+  # 0/SEP#7:0 -> 0/NullSrcSink#0:1
+  # 0/SEP#8:0 -> 0/NullSrcSink#1:1
+  # 0/SEP#9:0 -> 0/NullSrcSink#2:1
+
+# Dynamic block connections
+# Add/modify connections as needed for your application
+connections:
+
+  # Example connections for available ports:
+  # 0/AddSub#0:0 (output) is available
+  # 0/AddSub#0:1 (output) is available
+  # 0/AddSub#0:0 (input) is available
+  # 0/AddSub#0:1 (input) is available
+  # 0/DDC#0:0 (output) is available
+  # 0/DDC#0:1 (output) is available
+  # 0/DDC#0:2 (output) is available
+  # 0/DDC#0:3 (output) is available
+  # 0/DDC#0:0 (input) is available
+  # 0/DDC#0:1 (input) is available
+  # 0/DDC#0:2 (input) is available
+  # 0/DDC#0:3 (input) is available
+  # 0/NullSrcSink#0:0 (output) is available
+  # 0/NullSrcSink#0:1 (output) is available
+  # 0/NullSrcSink#0:0 (input) is available
+  # 0/NullSrcSink#0:1 (input) is available
+  # 0/NullSrcSink#1:0 (output) is available
+  # 0/NullSrcSink#1:1 (output) is available
+  # 0/NullSrcSink#1:0 (input) is available
+  # 0/NullSrcSink#1:1 (input) is available
+  # 0/NullSrcSink#2:0 (output) is available
+  # 0/NullSrcSink#2:1 (output) is available
+  # 0/NullSrcSink#2:0 (input) is available
+  # 0/NullSrcSink#2:1 (input) is available
+  # 0/Radio#0:0 (output) is available
+  # 0/Radio#0:1 (output) is available
+  # 0/SigGen#0:0 (output) is available
+  # 0/SigGen#0:0 (input) is available
+  # 0/SigGen#1:0 (output) is available
+  # 0/SigGen#1:0 (input) is available
+  # 0/SplitStream#0:0 (output) is available
+  # 0/SplitStream#0:1 (output) is available
+  # 0/SplitStream#0:0 (input) is available
+  # 0/SplitStream#1:0 (output) is available
+  # 0/SplitStream#1:1 (output) is available
+  # 0/SplitStream#1:2 (output) is available
+  # 0/SplitStream#1:3 (output) is available
+  # 0/SplitStream#1:0 (input) is available
+  # 0/Switchboard#0:0 (output) is available
+  # 0/Switchboard#0:1 (output) is available
+  # 0/Switchboard#0:2 (output) is available
+  # 0/Switchboard#0:0 (input) is available
+  # 0/Switchboard#0:1 (input) is available
+  # 0/Switchboard#0:2 (input) is available
+  # 0/Switchboard#1:0 (output) is available
+  # 0/Switchboard#1:1 (output) is available
+  # 0/Switchboard#1:2 (output) is available
+  # 0/Switchboard#1:3 (output) is available
+  # 0/Switchboard#1:4 (output) is available
+  # 0/Switchboard#1:5 (output) is available
+  # 0/Switchboard#1:0 (input) is available
+  # 0/Switchboard#1:1 (input) is available
+  # 0/Switchboard#1:2 (input) is available
+  # 0/Switchboard#1:3 (input) is available
+  # 0/Switchboard#1:4 (input) is available
+  # 0/Switchboard#1:5 (input) is available
+
+# Switchboard routing configuration
+switchboards:
+  - block_id: "0/Switchboard#0"
+    connections:
+      - input: 0
+        output: 1
+
+  - block_id: "0/Switchboard#1"
+    connections:
+      - input: 2
+        output: 0
+      - input: 3
+        output: 1
+      - input: 4
+        output: 2
+      - input: 5
+        output: 3
+
+
+# Stream endpoint configuration
+stream_endpoints:
+  - block_id: "0/DDC#0"
+    port: 0
+    direction: "rx"
+    enabled: true
+    name: "Stream_0"
+    stream_args:
+      spp: "200"
+  - block_id: "0/DDC#0"
+    port: 1
+    direction: "rx"
+    enabled: true
+    name: "Stream_1"
+    stream_args:
+      spp: "200"
+  - block_id: "0/DDC#0"
+    port: 2
+    direction: "rx"
+    enabled: true
+    name: "Stream_2"
+    stream_args:
+      spp: "200"
+  - block_id: "0/DDC#0"
+    port: 3
+    direction: "rx"
+    enabled: true
+    name: "Stream_3"
+    stream_args:
+      spp: "200"
+
+# Block-specific properties
+# Configure based on your application requirements
+block_properties:
+
+  # AddSub block configuration
+  "0/AddSub#0":
+    # Note: "AddSub blocks have no runtime configurable properties"
+
+  # DDC block configuration
+  "0/DDC#0":
+    freq/0: "1000000000"
+    freq/1: "1000000000"
+    freq/2: "1000000000"
+    freq/3: "1000000000"
+    output_rate/0: "100000"
+    output_rate/1: "100000"
+    output_rate/2: "100000"
+    output_rate/3: "100000"
+
+  # NullSrcSink block configuration
+  "0/NullSrcSink#0":
+    # No configurable properties for this block type
+  "0/NullSrcSink#1":
+    # No configurable properties for this block type
+  "0/NullSrcSink#2":
+    # No configurable properties for this block type
+
+  # Radio block configuration
+  "0/Radio#0":
+    antenna/0: "RX1"
+    antenna/1: "RX2"
+    bandwidth/0: "1e6"
+    bandwidth/1: "1e6"
+    freq/0: "1e9"
+    freq/1: "1e9"
+    gain/0: "30"
+    gain/1: "30"
+    rate: "200e6"
+
+  # SigGen block configuration
+  # "0/SigGen#0":
+  #   amplitude/0: "0.5"
+  #   enable/0: "true"
+  #   frequency/0: "1000"
+  #   waveform/0: "sine"
+  # "0/SigGen#1":
+  #   amplitude/0: "0.5"
+  #   enable/0: "true"
+  #   frequency/0: "1000"
+  #   waveform/0: "sine"
+
+  # SplitStream block configuration
+  "0/SplitStream#0":
+    # Note: "SplitStream routing is typically static"
+  "0/SplitStream#1":
+    # Note: "SplitStream routing is typically static"
+
+  # Switchboard block configuration
+  "0/Switchboard#0":
+    # No configurable properties for this block type
+  "0/Switchboard#1":
+    # No configurable properties for this block type
+
+# Auto-connection settings
+auto_connect:
+  radio_to_ddc: false  # Radio and DDC blocks detected
+  find_stream_endpoint: false
+
+# Advanced configuration options
+advanced:
+  commit_after_each_connection: false
+  discover_static_connections: true
+  preserve_static_routes: true
+  block_init_order:
+    - "0/Radio#0"
+    - "0/DDC#0"
+    - "0/AddSub#0"
+    - "0/SigGen#0"
+    - "0/SigGen#1"
+    - "0/SplitStream#0"
+    - "0/SplitStream#1"
+    - "0/Switchboard#0"
+    - "0/Switchboard#1"
+
+# Signal paths to explicitly establish
+signal_paths:
+  - name: "Radio to DDC via Switchboards"
+    connections:
+      - src: "0/Radio#0:0"
+        dst: "0/Switchboard#0:0"
+      - src: "0/Switchboard#0:1"  # After internal routing
+        dst: "0/SplitStream#1:0"
+      - src: "0/SplitStream#1:0"
+        dst: "0/Switchboard#1:2"
+      - src: "0/SplitStream#1:1"
+        dst: "0/Switchboard#1:3"
+      - src: "0/SplitStream#1:2"
+        dst: "0/Switchboard#1:4"
+      - src: "0/SplitStream#1:3"
+        dst: "0/Switchboard#1:5"
+      - src: "0/Switchboard#1:0"  # After internal routing
+        dst: "0/DDC#0:0"
+      - src: "0/Switchboard#1:1"
+        dst: "0/DDC#0:1"
+      - src: "0/Switchboard#1:2"
+        dst: "0/DDC#0:2"
+      - src: "0/Switchboard#1:3"
+        dst: "0/DDC#0:3"
