@@ -42,17 +42,7 @@ static_connections:
   # 0/Switchboard#1:1 -> 0/DDC#0:1
   # 0/Switchboard#1:2 -> 0/DDC#0:2
   # 0/Switchboard#1:3 -> 0/DDC#0:3
-  # 0/Switchboard#1:4 -> 0/NullSrcSink#1:0
-  # 0/Switchboard#1:5 -> 0/NullSrcSink#2:0
-  # 0/NullSrcSink#0:0 -> 0/SEP#4:0
-  # 0/NullSrcSink#1:0 -> 0/SEP#5:0
-  # 0/NullSrcSink#2:0 -> 0/SEP#6:0
-  # 0/NullSrcSink#0:1 -> 0/SEP#7:0
-  # 0/NullSrcSink#1:1 -> 0/SEP#8:0
-  # 0/NullSrcSink#2:1 -> 0/SEP#9:0
-  # 0/SEP#7:0 -> 0/NullSrcSink#0:1
-  # 0/SEP#8:0 -> 0/NullSrcSink#1:1
-  # 0/SEP#9:0 -> 0/NullSrcSink#2:1
+
 
 # Dynamic block connections
 # Add/modify connections as needed for your application

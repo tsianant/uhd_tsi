@@ -30,6 +30,7 @@ set(example_sources
     spi.cpp
     sync_to_gps.cpp
     raw_chdr_capture.cpp
+    rfnoc_stream_tool.cpp
     rfnoc_nullsource_ce_rx.cpp
     rfnoc_rx_to_file.cpp
     rfnoc_radio_loopback.cpp
