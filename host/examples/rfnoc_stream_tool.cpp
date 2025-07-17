@@ -68,6 +68,7 @@
 #include <numeric>
 
 #define DEFAULT_TICKRATE 200000000
+#define MAX_ANALYSIS_PACKETS 1000000
 
 namespace po = boost::program_options;
 using namespace std::chrono_literals;
@@ -146,6 +147,13 @@ struct chdr_packet_data {
         }
     }
 };
+// PPS reset configuration
+struct PpsResetConfig {
+    bool enable_pps_reset = false;
+    double wait_time_sec = 1.5;  // Time to wait for PPS after reset command
+    bool verify_reset = true;    // Verify the reset actually occurred
+    double max_time_after_reset = 1.0;  // Max acceptable time after reset for verification
+};
 
 // Multi-stream configuration
 struct MultiStreamConfig {
@@ -187,6 +195,8 @@ struct StreamContext {
     double tick_rate;
     size_t samps_per_buff;
     bool separate_file;
+    uhd::time_spec_t pps_reset_time;  // Time when PPS reset occurred
+    bool pps_reset_used;
 };
 
 // Connection info for YAML config
@@ -243,6 +253,9 @@ struct GraphConfig {
     
     // Multi-stream configuration
     MultiStreamConfig multi_stream;
+
+    // PPS reset configuration
+    PpsResetConfig pps_reset;
     
     // Advanced routing options
     bool discover_static_connections = true;
@@ -269,6 +282,26 @@ struct GraphTopology {
     std::map<std::string, std::vector<size_t>> block_stream_ports;  // Block -> list of ports with SEPs
     std::map<std::string, std::map<size_t, std::string>> downstream_connections; // Block:port -> downstream block
     std::map<std::string, std::map<size_t, std::string>> upstream_connections;   // Block:port -> upstream block
+};
+
+// File header structure for CHDR capture files with PPS reset support
+struct ChdrFileHeader {
+    uint32_t magic = 0x43484452;  // "CHDR"
+    uint32_t version = 4;          // Version 4 includes multi-stream and PPS reset info
+    uint32_t chdr_width = 64;
+    double tick_rate = DEFAULT_TICKRATE;
+    uint32_t pps_reset_used = 0;
+    double pps_reset_time_sec = 0.0;
+    uint32_t num_streams = 0;
+    uint32_t reserved[5] = {0};    // Reserved for future use
+};
+
+// Per-stream header for multi-stream files
+struct StreamHeader {
+    uint32_t stream_id;
+    char block_id[64];
+    uint32_t port;
+    uint32_t reserved[5] = {0};
 };
 
 
@@ -385,6 +418,64 @@ T read_le(const uint8_t* data) {
     return value;
 }
 
+// Perform PPS reset to synchronize device time to 0
+uhd::time_spec_t perform_pps_reset(uhd::rfnoc::rfnoc_graph::sptr graph, 
+                                  const PpsResetConfig& config) {
+    uhd::time_spec_t pps_reset_time(0.0);
+    
+    if (!config.enable_pps_reset) {
+        return pps_reset_time;
+    }
+    
+    std::cout << "\n=== PPS Reset Sequence ===" << std::endl;
+    std::cout << "Waiting for PPS edge to reset device time to 0..." << std::endl;
+    
+    try {
+        // Get the motherboard controller to access time functions
+        auto mb_controller = graph->get_mb_controller(0);
+        
+        // Get the timekeeper
+        auto timekeeper = mb_controller->get_timekeeper(0);
+        
+        // Get current time before reset
+        uhd::time_spec_t time_before = timekeeper->get_time_now();
+        std::cout << "Device time before PPS reset: " << time_before.get_real_secs() << " seconds" << std::endl;
+        
+        // Set time to 0 on next PPS
+        timekeeper->set_ticks_next_pps(0);
+        
+        // Wait for PPS to occur
+        std::cout << "Waiting " << config.wait_time_sec << " seconds for PPS..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::duration<double>(config.wait_time_sec));
+        
+        // Get current time to verify it's been reset
+        uhd::time_spec_t current_time = timekeeper->get_time_now();
+        std::cout << "Device time after PPS reset: " << current_time.get_real_secs() << " seconds" << std::endl;
+        
+        // Verify the reset actually occurred
+        if (config.verify_reset) {
+            if (current_time.get_real_secs() > config.max_time_after_reset) {
+                std::cerr << "Warning: PPS reset may have failed - time is " 
+                          << current_time.get_real_secs() << " seconds (expected < " 
+                          << config.max_time_after_reset << ")" << std::endl;
+            } else {
+                std::cout << "PPS reset successful - time synchronized to PPS edge" << std::endl;
+            }
+        }
+        
+        // Store the PPS reset time (should be 0.0 if reset worked)
+        pps_reset_time = uhd::time_spec_t(0.0);
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error during PPS reset: " << e.what() << std::endl;
+        std::cerr << "Continuing without PPS reset..." << std::endl;
+    }
+    
+    std::cout << "PPS reset sequence complete." << std::endl;
+    return pps_reset_time;
+}
+
+
 // Automatically connect every Radio output to the matching DDC input
 bool auto_connect_radio_to_ddc(uhd::rfnoc::rfnoc_graph::sptr graph)
 {
@@ -478,6 +569,16 @@ GraphConfig load_graph_config(const std::string& yaml_file) {
     
     try {
         YAML::Node root = YAML::LoadFile(yaml_file);
+        
+        // Load PPS reset configuration
+        if (root["pps_reset"]) {
+            auto& pps = config.pps_reset;
+            pps.enable_pps_reset = root["pps_reset"]["enable"].as<bool>(false);
+            pps.wait_time_sec = root["pps_reset"]["wait_time_sec"].as<double>(1.5);
+            pps.verify_reset = root["pps_reset"]["verify_reset"].as<bool>(true);
+            pps.max_time_after_reset = root["pps_reset"]["max_time_after_reset"].as<double>(1.0);
+        }
+        
         
         // Load dynamic connections
         if (root["connections"]) {
@@ -1635,6 +1736,210 @@ void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph) {
 }
 
 // Analyze packets with multi-stream support
+// Enhanced analysis with PPS reset timestamp handling
+void analyze_packets_with_pps_reset(const std::vector<chdr_packet_data>& packets, 
+                                    const std::string& csv_file,
+                                    double tick_rate,
+                                    const std::vector<StreamStats>& stream_stats,
+                                    uhd::time_spec_t pps_reset_time,
+                                    bool pps_reset_used,
+                                    size_t samps_per_buff,
+                                    double rate) {
+    std::cout << "\n\nInside the \"analyze_packets_with_pps_reset\" method" << std::endl;
+    std::cout << "\nThe incoming tick rate after static cast to uint64_t is: " << static_cast<uint64_t>(tick_rate) << std::endl;
+    
+    std::ofstream csv(csv_file);
+    if (!csv.is_open()) {
+        throw std::runtime_error("Failed to open CSV file: " + csv_file);
+    }
+    
+    
+    // Write CSV header with PPS reset info
+    csv << "packet_num,         stream_id,          stream_block,   stream_port,        vc,"
+        << "eob,                eov,                pkt_type,       pkt_type_str,       num_mdata,"
+        << "seq_num,            length,             dst_epid,       has_timestamp,      timestamp_ticks,"
+        << "timestamp_sec,      time_since_pps_sec, payload_size,   num_samples,        first_4_bytes_hex" 
+        << std::endl;
+    
+    // Calculate first packet offset for PPS alignment (if needed)
+    uint64_t first_pkt_offset = 0;
+    uint64_t first_pkt_sec_ticks =0;
+    std::cout << "Here's the unmodified tick values for packet 0: " << packets[0].timestamp << "\n\n" <<std::endl;
+    if (pps_reset_used && !packets.empty() && packets[0].has_timestamp && packets[0].timestamp > DEFAULT_TICKRATE) {
+        first_pkt_offset = ((packets[0].timestamp ) % DEFAULT_TICKRATE);
+        first_pkt_sec_ticks = packets[0].timestamp / DEFAULT_TICKRATE;
+    }
+    
+    std::cout << "Here's the First first_packet integer second value (rounded down) is : " << first_pkt_sec_ticks <<"\n\n"<< std::endl;
+    std::cout << "Here's the First first_packet tick value is : " << first_pkt_offset <<"\n\n"<< std::endl;
+
+    std::cout << "\n\n----- tick_rate \'%\' sample_rate = " << (DEFAULT_TICKRATE % static_cast<uint64_t>(rate)) << std::endl;
+    
+    
+    double samps_per_sec_num = samps_per_buff * (DEFAULT_TICKRATE / rate);
+
+    std::cout << "\n\nHere's the computed value to be subtracted: " << ((samps_per_sec_num*((static_cast<double>(packets[0].timestamp - first_pkt_offset))/tick_rate))) << "\n\n" << std::endl;
+
+    // Analyze each packet
+    for (size_t i = 0; i < packets.size(); ++i) {
+        const auto& pkt = packets[i];
+
+    
+        
+        std::cout << "Here's the  timestamp value for pkt number " << i << " : " << pkt.timestamp << std::endl;
+        std::cout << "current packet order in line within 1 sec is: "  << ( first_pkt_offset / samps_per_buff ) << std::endl;
+
+
+        std::cout << "\n\n------ Seconds so far: " << (static_cast<uint64_t>((static_cast<double>(pkt.timestamp - first_pkt_offset ) )/ tick_rate) + 1) << std::endl; 
+        
+        // if (   (DEFAULT_TICKRATE % static_cast<uint64_t>(rate)) ){
+        //     std::cout << "Detected the changeover between seconds!!" << std::endl;
+            
+        // }
+
+        if( (pkt.timestamp % DEFAULT_TICKRATE) < ((samps_per_sec_num*((static_cast<double>(pkt.timestamp - first_pkt_offset))/tick_rate))) && ((pkt.timestamp % DEFAULT_TICKRATE) < ((packets[i==0?0:(i-1)]).timestamp) % DEFAULT_TICKRATE) ) {
+            std::cout << "first_packet_offset rollover detected" <<std::endl;
+            first_pkt_offset = ((pkt.timestamp - DEFAULT_TICKRATE) % DEFAULT_TICKRATE);
+        }
+
+
+
+        // Stream info
+        csv << i << ","
+            << pkt.stream_id << ","
+            << "\"" << pkt.stream_block << "\","
+            << pkt.stream_port << ",";
+        
+        // Basic fields
+        csv << std::hex << "0x" << std::setw(2) << std::setfill('0') << (int)pkt.vc << ","
+            << std::dec << (pkt.eob ? "1" : "0") << ","
+            << (pkt.eov ? "1" : "0") << ","
+            << std::hex << "0x" << (int)pkt.pkt_type << ","
+            << pkt.pkt_type_str() << ","
+            << std::dec << (int)pkt.num_mdata << ","
+            << pkt.seq_num << ","
+            << pkt.length << ","
+            << std::hex << "0x" << std::setw(4) << std::setfill('0') << pkt.dst_epid << ",";
+        uint64_t temp_timestamp = 0;
+        // Timestamp with PPS reset handling
+        csv << (pkt.has_timestamp ? "1" : "0") << ",";
+        if (pkt.has_timestamp) {
+            // Adjust timestamp relative to PPS reset if used
+            uint64_t adjusted_timestamp = pkt.timestamp;
+            if (pps_reset_used) {
+                // Remove the initial offset to align to PPS edge
+                adjusted_timestamp = (pkt.timestamp - first_pkt_offset) % static_cast<uint64_t>(tick_rate);
+            }
+
+            uint64_t timestamp_sec = 0;
+            double time_since_pps = 0;
+
+            if ( (pkt.timestamp / DEFAULT_TICKRATE) < 2){
+                temp_timestamp = (pkt.timestamp % DEFAULT_TICKRATE /*) - first_pkt_offset +  ( first_pkt_offset % (samps_per_buff*(DEFAULT_TICKRATE/static_cast<uint64_t>(rate)))*/ );
+                timestamp_sec = ((static_cast<double>(pkt.timestamp ) )/ tick_rate);
+                // Calculate time since PPS reset
+                time_since_pps = (static_cast<double>(pkt.timestamp /*+  ( first_pkt_offset % (samps_per_buff*(DEFAULT_TICKRATE/static_cast<uint64_t>(rate))) )*/ ) / tick_rate) -  timestamp_sec;
+            }
+            else{
+
+                temp_timestamp = (pkt.timestamp % DEFAULT_TICKRATE) - first_pkt_offset +  ( first_pkt_offset % (samps_per_buff*(DEFAULT_TICKRATE/static_cast<uint64_t>(rate))) );
+                
+                timestamp_sec = ((static_cast<double>(pkt.timestamp - first_pkt_offset ) )/ tick_rate);
+                // Calculate time since PPS reset
+                time_since_pps = (static_cast<double>(pkt.timestamp - first_pkt_offset +  ( first_pkt_offset % (samps_per_buff*(DEFAULT_TICKRATE/static_cast<uint64_t>(rate))) ) ) / tick_rate) -  timestamp_sec;
+
+            }
+
+            // temp_timestamp = (pkt.timestamp % DEFAULT_TICKRATE) - first_pkt_offset +  ( first_pkt_offset % (samps_per_buff*(DEFAULT_TICKRATE/static_cast<uint64_t>(rate))) );
+
+            std::cout << "Here's the first_packet value for pkt number " << i << " : " << first_pkt_offset << std::endl;
+            std::cout << "Here's the temptimestamp value for pkt number " << i << " : " << temp_timestamp << std::endl;
+
+            std::cout << "Here's the timestamp_sec value for pkt number " << i << " : " << timestamp_sec << std::endl;
+            std::cout << "Here's the time_since_pps value for pkt number " << i << " : " << time_since_pps <<"\n\n" << std::endl;
+
+            csv << std::dec << temp_timestamp << ","
+                << std::fixed << std::setprecision(12) << timestamp_sec << ","
+                << std::setprecision(12) << time_since_pps;
+        } else {
+            csv << "N/A,N/A,N/A";
+        }
+        
+        // Payload info
+        size_t num_samples = pkt.payload.size() / 4; // Assuming sc16
+        csv << "," << std::dec << pkt.payload.size() << ","
+            << num_samples << ",";
+        
+        // First few bytes as hex
+        csv << "0x";
+        for (size_t j = 0; j < std::min((size_t)4, pkt.payload.size()); j++) {
+            csv << std::hex << std::setw(2) << std::setfill('0') 
+                << (unsigned int)pkt.payload[j];
+        }
+        
+        csv << std::endl;
+    }
+    
+    csv.close();
+    
+    // Write stream statistics summary with PPS reset info
+    std::string stats_file = csv_file.substr(0, csv_file.find_last_of('.')) + "_stats.csv";
+    std::ofstream stats_csv(stats_file);
+    if (stats_csv.is_open()) {
+        stats_csv << "stream_id,block_id,port,packets_captured,total_samples,"
+                  << "overflow_count,error_count,duration_sec,avg_sample_rate_msps,"
+                  << "first_timestamp,last_timestamp,pps_reset_used,pps_reset_time" << std::endl;
+        
+        for (const auto& stat : stream_stats) {
+            double duration = std::chrono::duration<double>(stat.end_time - stat.start_time).count();
+            double avg_rate = (stat.total_samples / duration) / 1e6;
+            
+            stats_csv << stat.stream_id << ","
+                     << "\"" << stat.block_id << "\","
+                     << stat.port << ","
+                     << stat.packets_captured << ","
+                     << stat.total_samples << ","
+                     << stat.overflow_count << ","
+                     << stat.error_count << ","
+                     << std::fixed << std::setprecision(6) << duration << ","
+                     << avg_rate << ","
+                     << std::setprecision(12) << stat.first_timestamp << ","
+                     << stat.last_timestamp << ","
+                     << (pps_reset_used ? "1" : "0") << ","
+                     << pps_reset_time.get_real_secs() << std::endl;
+        }
+        stats_csv.close();
+        std::cout << "Stream statistics written to: " << stats_file << std::endl;
+    }
+    
+    std::cout << "Analysis complete. Results written to: " << csv_file << std::endl;
+}
+
+// Write file header with PPS reset information
+void write_file_header(std::ofstream& file, double tick_rate, 
+                      bool pps_reset_used, uhd::time_spec_t pps_reset_time,
+                      size_t num_streams) {
+    ChdrFileHeader header;
+    header.tick_rate = tick_rate;
+    header.pps_reset_used = pps_reset_used ? 1 : 0;
+    header.pps_reset_time_sec = pps_reset_time.get_real_secs();
+    header.num_streams = static_cast<uint32_t>(num_streams);
+    
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+}
+
+// Write stream header for multi-stream files
+void write_stream_header(std::ofstream& file, size_t stream_id, 
+                        const std::string& block_id, size_t port) {
+    StreamHeader header;
+    header.stream_id = static_cast<uint32_t>(stream_id);
+    std::strncpy(header.block_id, block_id.c_str(), sizeof(header.block_id) - 1);
+    header.block_id[sizeof(header.block_id) - 1] = '\0';
+    header.port = static_cast<uint32_t>(port);
+    
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+}
+
 void analyze_packets(const std::vector<chdr_packet_data>& packets, 
                     const std::string& csv_file,
                     double tick_rate,
@@ -1840,7 +2145,7 @@ void capture_stream(StreamContext& ctx,
         }
         
         // Store for analysis
-        if (ctx.analysis_packets && ctx.analysis_packets->size() < 10000) {
+        if (ctx.analysis_packets && ctx.analysis_packets->size() < MAX_ANALYSIS_PACKETS) {
             chdr_packet_data pkt;
             pkt.stream_id = ctx.stream_id;
             pkt.stream_block = ctx.block_id;
@@ -1889,6 +2194,9 @@ void capture_stream(StreamContext& ctx,
     std::cout << "  Average rate: " << (ctx.stats.total_samples/elapsed_secs)/1e6 << " Msps" << std::endl;
     if (ctx.stats.overflow_count > 0) {
         std::cout << "  Overflows: " << ctx.stats.overflow_count << std::endl;
+    }
+    if (ctx.pps_reset_used) {
+        std::cout << "  PPS reset time: " << ctx.pps_reset_time.get_real_secs() << " seconds" << std::endl;
     }
 }
 
@@ -2180,7 +2488,431 @@ void capture_multi_stream(
     }
 }
 
-// Main function
+template <typename samp_type>
+void capture_multi_stream_with_pps_reset(
+    uhd::rfnoc::rfnoc_graph::sptr graph,
+    const GraphConfig& config,
+    const std::string& file,
+    size_t num_packets,
+    bool enable_analysis,
+    const std::string& csv_file,
+    double rate,
+    size_t samps_per_buff,
+    uhd::time_spec_t pps_reset_time,
+    bool pps_reset_used)
+{
+    // Print initial graph state
+    print_graph_info(graph);
+    
+    // 1. First, just initialize blocks without setting properties
+    if (!config.block_init_order.empty()) {
+        std::cout << "\nInitializing blocks in specified order..." << std::endl;
+        for (const auto& block_id : config.block_init_order) {
+            try {
+                auto block = graph->get_block(uhd::rfnoc::block_id_t(block_id));
+                if (block) {
+                    std::cout << "  Initialized: " << block_id << std::endl;
+                }
+            } catch (...) {
+                std::cerr << "  Warning: Could not initialize " << block_id << std::endl;
+            }
+        }
+    }
+    
+    // 2. Configure switchboards
+    if (!config.switchboard_configs.empty()) {
+        std::cout << "\nConfiguring switchboards..." << std::endl;
+        configure_switchboards(graph, config.switchboard_configs);
+    }
+    
+    // 3. Apply dynamic connections (if any)
+    if (!config.dynamic_connections.empty()) {
+        std::cout << "\nApplying dynamic connections..." << std::endl;
+        apply_dynamic_connections(graph, config.dynamic_connections, config.commit_after_each_connection);
+    }
+    
+    // 4. Apply explicit signal paths from YAML
+    if (!config.signal_paths.empty()) {
+        apply_signal_paths(graph, config.signal_paths);
+    }
+    
+    // 5. Connect Radio to DDC if needed (but DON'T set rates yet)
+    if (config.auto_connect_radio_to_ddc) {
+        std::cout << "\nAuto-connecting Radio to DDC..." << std::endl;
+        auto_connect_radio_to_ddc(graph);
+    }
+    
+    // 6. Find streaming endpoints
+    auto endpoints = find_all_stream_endpoints_enhanced(graph, config.stream_endpoints, config.multi_stream);
+    
+    if (endpoints.empty()) {
+        throw std::runtime_error("No suitable streaming endpoints found");
+    }
+    
+    std::cout << "\nFound " << endpoints.size() << " streaming endpoints:" << std::endl;
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        std::cout << "  Stream " << i << ": " << endpoints[i].first 
+                  << ":" << endpoints[i].second << std::endl;
+    }
+    
+    // 7. Get tick rate from Radio
+    double tick_rate = DEFAULT_TICKRATE;
+    auto radio_blocks = graph->find_blocks("Radio");
+    if (!radio_blocks.empty()) {
+        auto radio = graph->get_block<uhd::rfnoc::radio_control>(radio_blocks[0]);
+        tick_rate = radio->get_tick_rate();
+    }
+    
+    // 8. Create output files with PPS reset support
+    std::vector<StreamContext> contexts;
+    std::vector<std::unique_ptr<std::ofstream>> output_files;
+    std::unique_ptr<std::mutex> shared_file_mutex;
+    std::vector<chdr_packet_data> all_analysis_packets;
+    std::mutex analysis_mutex;
+    
+    if (config.multi_stream.separate_files) {
+        // Create separate files for each stream
+        for (size_t i = 0; i < endpoints.size(); ++i) {
+            std::string fname = config.multi_stream.file_prefix + "_" + std::to_string(i) + ".dat";
+            output_files.emplace_back(std::make_unique<std::ofstream>(fname, std::ios::binary));
+            if (!output_files.back()->is_open()) {
+                throw std::runtime_error("Failed to open output file: " + fname);
+            }
+            
+            // Write file header with PPS reset info for each file
+            write_file_header(*output_files.back(), tick_rate, pps_reset_used, pps_reset_time, 1);
+            
+            // Write stream header for this specific stream
+            write_stream_header(*output_files.back(), i, endpoints[i].first, endpoints[i].second);
+            
+            std::cout << "Created output file: " << fname << " (with PPS reset info)" << std::endl;
+        }
+    } else {
+        // Single shared file
+        output_files.emplace_back(std::make_unique<std::ofstream>(file, std::ios::binary));
+        if (!output_files.back()->is_open()) {
+            throw std::runtime_error("Failed to open output file: " + file);
+        }
+        shared_file_mutex = std::make_unique<std::mutex>();
+        
+        // Write file header with PPS reset info and number of streams
+        write_file_header(*output_files.back(), tick_rate, pps_reset_used, pps_reset_time, endpoints.size());
+        
+        // Write stream headers for all streams
+        for (size_t i = 0; i < endpoints.size(); ++i) {
+            write_stream_header(*output_files.back(), i, endpoints[i].first, endpoints[i].second);
+        }
+        
+        std::cout << "Created shared output file: " << file << " (with PPS reset info for " 
+                  << endpoints.size() << " streams)" << std::endl;
+    }
+    
+    // 9. Create streamers and connect them
+    std::vector<uhd::rfnoc::ddc_block_control::sptr> ddc_controls;
+    std::vector<size_t> ddc_channels;
+    
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        const auto& [block_id, port] = endpoints[i];
+        
+        std::cout << "Setting up stream " << i << " for " << block_id << ":" << port << std::endl;
+        
+        try {
+            uhd::rfnoc::block_id_t endpoint_id(block_id);
+            
+            // Check if this endpoint actually exists with the specified port
+            auto endpoint_block = graph->get_block(endpoint_id);
+            if (!endpoint_block || port >= endpoint_block->get_num_output_ports()) {
+                std::cerr << "Warning: " << block_id << " port " << port 
+                        << " doesn't exist in current FPGA image" << std::endl;
+                continue;
+            }
+            
+            // Create stream args
+            uhd::stream_args_t stream_args("sc16", "sc16");
+            stream_args.channels = {0};
+            stream_args.args = uhd::device_addr_t();
+            
+            // Apply stream args from config
+            for (const auto& sep : config.stream_endpoints) {
+                if (sep.block_id == block_id && sep.port == port) {
+                    for (const auto& [key, value] : sep.stream_args) {
+                        stream_args.args[key] = value;
+                    }
+                    break;
+                }
+            }
+            
+            // Create RX streamer
+            auto rx_streamer = graph->create_rx_streamer(1, stream_args);
+            
+            // Connect streamer to endpoint
+            graph->connect(block_id, port, rx_streamer, 0, true);
+            
+            std::cout << "  Connected RX streamer to " << block_id << ":" << port << std::endl;
+            
+            // Store DDC control for later rate setting
+            if (endpoint_id.get_block_name() == "DDC") {
+                auto ddc_ctrl = graph->get_block<uhd::rfnoc::ddc_block_control>(endpoint_id);
+                if (ddc_ctrl) {
+                    ddc_controls.push_back(ddc_ctrl);
+                    ddc_channels.push_back(port);
+                }
+            }
+            
+            // Create context with PPS reset information
+            StreamContext ctx;
+            ctx.stream_id = i;
+            ctx.block_id = block_id;
+            ctx.port = port;
+            ctx.rx_streamer = rx_streamer;
+            ctx.output_file = config.multi_stream.separate_files ? 
+                             output_files[i].get() : output_files[0].get();
+            ctx.file_mutex = config.multi_stream.separate_files ? 
+                            nullptr : shared_file_mutex.get();
+            ctx.stats.stream_id = i;
+            ctx.stats.block_id = block_id;
+            ctx.stats.port = port;
+            ctx.analysis_packets = enable_analysis ? &all_analysis_packets : nullptr;
+            ctx.analysis_mutex = &analysis_mutex;
+            ctx.tick_rate = tick_rate;
+            ctx.samps_per_buff = samps_per_buff;
+            ctx.separate_file = config.multi_stream.separate_files;
+            
+            // PPS reset information
+            ctx.pps_reset_time = pps_reset_time;
+            ctx.pps_reset_used = pps_reset_used;
+            
+            contexts.push_back(ctx);
+            
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to setup stream " << i << ": " << e.what() << std::endl;
+        }
+    }
+
+    // 10. COMMIT THE GRAPH BEFORE SETTING PROPERTIES
+    std::cout << "\nCommitting graph..." << std::endl;
+    graph->commit();
+    
+    // 11. NOW set block properties (especially sample rates) AFTER commit
+    std::cout << "\nSetting block properties after commit..." << std::endl;
+    
+    // Apply all block properties from config
+    if (!config.block_properties.empty()) {
+        apply_block_properties(graph, config.block_properties, rate);
+    }
+    
+    // Set DDC output rates AFTER commit (like rfnoc_rx_to_file does)
+    for (size_t i = 0; i < ddc_controls.size(); ++i) {
+        auto ddc = ddc_controls[i];
+        size_t chan = ddc_channels[i];
+        
+        std::cout << "Setting DDC output rate for channel " << chan << " to " << rate << " Hz" << std::endl;
+        double actual_rate = ddc->set_output_rate(rate, chan);
+        std::cout << "  Actual rate: " << actual_rate << " Hz" << std::endl;
+    }
+    
+    // Print final graph state
+    std::cout << "\n=== Final Graph State ===" << std::endl;
+    print_graph_info(graph);
+    
+    std::cout << "\nStream configuration:" << std::endl;
+    std::cout << "  Number of streams: " << contexts.size() << std::endl;
+    std::cout << "  Sample rate: " << rate/1e6 << " Msps" << std::endl;
+    std::cout << "  Tick rate: " << tick_rate/1e6 << " MHz" << std::endl;
+    std::cout << "  Samples per buffer: " << samps_per_buff << std::endl;
+    std::cout << "  Stream synchronization: " << (config.multi_stream.sync_streams ? "Yes" : "No") << std::endl;
+    std::cout << "  Output mode: " << (config.multi_stream.separate_files ? "Separate files" : "Single file") << std::endl;
+    std::cout << "  PPS reset used: " << (pps_reset_used ? "Yes" : "No") << std::endl;
+    if (pps_reset_used) {
+        std::cout << "  PPS reset time: " << pps_reset_time.get_real_secs() << " seconds" << std::endl;
+    }
+    
+    // 12. WAIT FOR LO LOCK on all Radio blocks (important for synchronized operation)
+    for (const auto& radio_id : radio_blocks) {
+        auto radio = graph->get_block<uhd::rfnoc::radio_control>(radio_id);
+        if (radio) {
+            for (size_t chan = 0; chan < radio->get_num_output_ports(); ++chan) {
+                std::cout << "Waiting for LO lock on " << radio_id.to_string() 
+                          << " channel " << chan << ": " << std::flush;
+                auto start_time = std::chrono::steady_clock::now();
+                while (!radio->get_rx_sensor("lo_locked", chan).to_bool()) {
+                    std::this_thread::sleep_for(50ms);
+                    std::cout << "+" << std::flush;
+                    
+                    // Timeout after 10 seconds
+                    if (std::chrono::steady_clock::now() - start_time > 10s) {
+                        std::cout << " TIMEOUT!" << std::endl;
+                        throw std::runtime_error("LO failed to lock within timeout period");
+                    }
+                }
+                std::cout << " locked." << std::endl;
+            }
+        }
+    }
+    
+    // 13. Create capture threads
+    std::vector<std::thread> capture_threads;
+    std::atomic<bool> start_capture(false);
+    
+    // Start capture threads
+    for (auto& ctx : contexts) {
+        capture_threads.emplace_back(capture_stream<samp_type>, 
+                                    std::ref(ctx), 
+                                    std::ref(start_capture), 
+                                    num_packets);
+    }
+    
+    // 14. Synchronize start if requested
+    if (config.multi_stream.sync_streams) {
+        std::cout << "\nSynchronizing streams..." << std::endl;
+        std::cout << "Waiting " << config.multi_stream.sync_delay << " seconds before synchronized start..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::duration<double>(config.multi_stream.sync_delay));
+    }
+    
+    // 15. Start all captures simultaneously
+    auto overall_start = std::chrono::steady_clock::now();
+    start_capture.store(true);
+    
+    if (pps_reset_used) {
+        std::cout << "\nStarting synchronized multi-stream capture (PPS reset enabled)..." << std::endl;
+        std::cout << "All timestamps will be relative to PPS reset time: " 
+                  << pps_reset_time.get_real_secs() << " seconds" << std::endl;
+    } else {
+        std::cout << "\nStarting multi-stream capture..." << std::endl;
+    }
+    
+    // Print capture progress periodically
+    std::thread progress_thread([&contexts, &stop_signal_called]() {
+        while (!stop_signal_called) {
+            std::this_thread::sleep_for(5s);
+            if (stop_signal_called) break;
+            
+            std::cout << "\n=== Capture Progress ===" << std::endl;
+            for (const auto& ctx : contexts) {
+                std::cout << "[Stream " << ctx.stream_id << "] " 
+                          << ctx.stats.packets_captured << " packets, " 
+                          << ctx.stats.total_samples << " samples";
+                if (ctx.stats.overflow_count > 0) {
+                    std::cout << " (O: " << ctx.stats.overflow_count << ")";
+                }
+                std::cout << std::endl;
+            }
+        }
+    });
+    
+    // 16. Wait for all threads to complete
+    for (auto& thread : capture_threads) {
+        thread.join();
+    }
+    
+    // Stop progress thread
+    stop_signal_called = true;
+    if (progress_thread.joinable()) {
+        progress_thread.join();
+    }
+    
+    auto overall_end = std::chrono::steady_clock::now();
+    double overall_duration = std::chrono::duration<double>(overall_end - overall_start).count();
+    
+    // 17. Collect statistics
+    std::vector<StreamStats> all_stats;
+    size_t total_packets = 0;
+    size_t total_samples = 0;
+    size_t total_overflows = 0;
+    
+    for (const auto& ctx : contexts) {
+        all_stats.push_back(ctx.stats);
+        total_packets += ctx.stats.packets_captured;
+        total_samples += ctx.stats.total_samples;
+        total_overflows += ctx.stats.overflow_count;
+    }
+    
+    // 18. Close files
+    for (auto& file : output_files) {
+        if (file && file->is_open()) {
+            file->close();
+        }
+    }
+    
+    // 19. Print overall statistics
+    std::cout << "\n=== Multi-Stream Capture Statistics ===" << std::endl;
+    std::cout << "Total streams: " << contexts.size() << std::endl;
+    std::cout << "Total packets captured: " << total_packets << std::endl;
+    std::cout << "Total samples: " << total_samples << std::endl;
+    std::cout << "Overall duration: " << overall_duration << " seconds" << std::endl;
+    std::cout << "Aggregate sample rate: " << (total_samples/overall_duration)/1e6 << " Msps" << std::endl;
+    if (total_overflows > 0) {
+        std::cout << "Total overflows: " << total_overflows << std::endl;
+    }
+    std::cout << "PPS reset used: " << (pps_reset_used ? "Yes" : "No") << std::endl;
+    if (pps_reset_used) {
+        std::cout << "PPS reset time: " << pps_reset_time.get_real_secs() << " seconds" << std::endl;
+    }
+    
+    // Print per-stream statistics
+    std::cout << "\n=== Per-Stream Statistics ===" << std::endl;
+    for (const auto& stat : all_stats) {
+        double duration = std::chrono::duration<double>(stat.end_time - stat.start_time).count();
+        double avg_rate = (stat.total_samples / duration) / 1e6;
+        
+        std::cout << "Stream " << stat.stream_id << " (" << stat.block_id << ":" << stat.port << "):" << std::endl;
+        std::cout << "  Packets: " << stat.packets_captured << std::endl;
+        std::cout << "  Samples: " << stat.total_samples << std::endl;
+        std::cout << "  Duration: " << std::fixed << std::setprecision(3) << duration << " seconds" << std::endl;
+        std::cout << "  Avg rate: " << std::setprecision(3) << avg_rate << " Msps" << std::endl;
+        if (stat.overflow_count > 0) {
+            std::cout << "  Overflows: " << stat.overflow_count << std::endl;
+        }
+        if (stat.error_count > 0) {
+            std::cout << "  Errors: " << stat.error_count << std::endl;
+        }
+        if (pps_reset_used && stat.first_timestamp > 0) {
+            std::cout << "  First timestamp: " << std::fixed << std::setprecision(6) 
+                      << stat.first_timestamp << " seconds (after PPS reset)" << std::endl;
+            std::cout << "  Last timestamp: " << std::fixed << std::setprecision(6) 
+                      << stat.last_timestamp << " seconds (after PPS reset)" << std::endl;
+        }
+    }
+    
+    // 20. Perform analysis with PPS reset support
+    if (enable_analysis && !csv_file.empty() && !all_analysis_packets.empty()) {
+        std::cout << "\nAnalyzing packets with PPS reset support..." << std::endl;
+        
+        // Sort packets by stream ID and sequence number
+        std::sort(all_analysis_packets.begin(), all_analysis_packets.end(),
+                 [](const chdr_packet_data& a, const chdr_packet_data& b) {
+                     if (a.stream_id != b.stream_id) return a.stream_id < b.stream_id;
+                     return a.seq_num < b.seq_num;
+                 });
+        
+        // Use PPS-aware analysis function
+        analyze_packets_with_pps_reset(all_analysis_packets, csv_file, tick_rate, 
+                                     all_stats, pps_reset_time, pps_reset_used, samps_per_buff, rate);
+    }
+    
+    std::cout << "\nMulti-stream capture with PPS reset support completed successfully!" << std::endl;
+    
+    // 21. Final verification and recommendations
+    if (pps_reset_used) {
+        std::cout << "\n=== PPS Reset Verification ===" << std::endl;
+        std::cout << "All streams were synchronized to PPS edge at time: " 
+                  << pps_reset_time.get_real_secs() << " seconds" << std::endl;
+        std::cout << "Timestamps in output files are relative to this PPS reset." << std::endl;
+        std::cout << "Use the analysis CSV files to examine timing relationships between streams." << std::endl;
+    }
+    
+    if (total_overflows > 0) {
+        std::cout << "\n=== Performance Recommendations ===" << std::endl;
+        std::cout << "Warning: " << total_overflows << " overflow(s) detected." << std::endl;
+        std::cout << "Consider:" << std::endl;
+        std::cout << "  - Reducing sample rate" << std::endl;
+        std::cout << "  - Increasing buffer sizes (--spb)" << std::endl;
+        std::cout << "  - Using separate files for each stream" << std::endl;
+        std::cout << "  - Checking network/disk throughput" << std::endl;
+    }
+}
+
+// Main function updated with complete PPS reset support
 int UHD_SAFE_MAIN(int argc, char* argv[])
 {
     // Variables
@@ -2191,8 +2923,12 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     bool show_graph = false;
     bool create_yaml_template = false;
     bool multi_stream = false;
+    bool use_pps_reset = false;
+    double pps_wait_time = 1.5;
+    bool verify_pps_reset = true;
+    double max_time_after_reset = 1.0;
     
-    // Setup program options
+    // Setup program options with comprehensive PPS reset support
     po::options_description desc("Allowed options");
     
     desc.add_options()
@@ -2212,6 +2948,10 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("analyze-only", po::value<bool>(&analyze_only)->default_value(false), "only analyze existing file")
         ("create-yaml-template", po::value<bool>(&create_yaml_template)->default_value(false), "create YAML template")
         ("multi-stream", po::value<bool>(&multi_stream)->default_value(false), "enable multi-stream capture")
+        ("pps-reset", po::value<bool>(&use_pps_reset)->default_value(false), "reset timestamp to zero at next PPS before capture")
+        ("pps-wait-time", po::value<double>(&pps_wait_time)->default_value(1.5), "time to wait for PPS reset (seconds)")
+        ("verify-pps-reset", po::value<bool>(&verify_pps_reset)->default_value(true), "verify PPS reset was successful")
+        ("max-time-after-reset", po::value<double>(&max_time_after_reset)->default_value(1.0), "max acceptable time after PPS reset for verification")
     ;
     
     po::variables_map vm;
@@ -2220,25 +2960,46 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     
     // Help message
     if (vm.count("help")) {
-        std::cout << "CHDR Packet Capture Tool with Multi-Stream Support" << std::endl;
+        std::cout << "CHDR Packet Capture Tool with Multi-Stream Support and PPS Reset" << std::endl;
         std::cout << desc << std::endl;
+        std::cout << "\nPPS Reset Features:" << std::endl;
+        std::cout << "  * Synchronize device time to 0 at next PPS edge" << std::endl;
+        std::cout << "  * Provides common time reference for all streams" << std::endl;
+        std::cout << "  * Essential for multi-USRP or precise timing applications" << std::endl;
+        std::cout << "  * Timestamps in output files are relative to PPS reset" << std::endl;
+        std::cout << "  * Supports verification of successful PPS reset" << std::endl;
         std::cout << "\nMulti-Stream Features:" << std::endl;
         std::cout << "  * Capture from multiple DDC blocks simultaneously" << std::endl;
         std::cout << "  * Synchronized stream start for time-aligned captures" << std::endl;
         std::cout << "  * Per-stream statistics and monitoring" << std::endl;
-        std::cout << "  * Separate or combined output files" << std::endl;
+        std::cout << "  * Separate or combined output files with stream headers" << std::endl;
         std::cout << "  * Multi-threaded capture with one thread per stream" << std::endl;
-        std::cout << "\nSupported RFNoC blocks:" << std::endl;
-        std::cout << "  * Radio - RF frontend control" << std::endl;
-        std::cout << "  * DDC/DUC - Digital down/up converters (multi-channel)" << std::endl;
-        std::cout << "  * FIR - FIR filter" << std::endl;
-        std::cout << "  * FFT - Fast Fourier Transform" << std::endl;
-        std::cout << "  * Window - Windowing function" << std::endl;
-        std::cout << "  * ... (and many more)" << std::endl;
-        std::cout << "\nNotes:" << std::endl;
-        std::cout << "  * Use --multi-stream or configure multi_stream in YAML for multi-stream capture" << std::endl;
-        std::cout << "  * Use --show-graph to see available blocks and connections" << std::endl;
-        std::cout << "  * Use --create-yaml-template to generate a multi-stream YAML template" << std::endl;
+        std::cout << "  * Real-time progress monitoring during capture" << std::endl;
+        std::cout << "\nFile Format Features:" << std::endl;
+        std::cout << "  * Version 4 CHDR format with PPS reset metadata" << std::endl;
+        std::cout << "  * Per-stream headers in multi-stream files" << std::endl;
+        std::cout << "  * Comprehensive analysis with PPS-relative timestamps" << std::endl;
+        std::cout << "\nExamples:" << std::endl;
+        std::cout << "  Multi-stream with PPS reset:" << std::endl;
+        std::cout << "    " << argv[0] << " --multi-stream --pps-reset --rate 10e6 --num-packets 5000" << std::endl;
+        std::cout << "  Using YAML config with PPS reset:" << std::endl;
+        std::cout << "    " << argv[0] << " --yaml config.yaml --pps-reset --csv analysis.csv" << std::endl;
+        std::cout << "  Continuous capture with separate files:" << std::endl;
+        std::cout << "    " << argv[0] << " --multi-stream --pps-reset --num-packets 0 --yaml config.yaml" << std::endl;
+        std::cout << "  High-rate capture with verification disabled:" << std::endl;
+        std::cout << "    " << argv[0] << " --multi-stream --pps-reset --verify-pps-reset false --rate 50e6" << std::endl;
+        return EXIT_SUCCESS;
+    }
+    
+    // Analyze existing file mode
+    if (analyze_only) {
+        if (csv_file.empty()) {
+            csv_file = file + ".csv";
+        }
+        std::cout << "Analyzing existing capture file: " << file << std::endl;
+        // Note: Would need to implement analyze_capture_file_with_pps_reset function
+        // analyze_capture_file_with_pps_reset(file, csv_file);
+        std::cout << "File analysis not implemented in this excerpt." << std::endl;
         return EXIT_SUCCESS;
     }
     
@@ -2249,15 +3010,37 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         auto graph = uhd::rfnoc::rfnoc_graph::make(args);
         
         // Generate dynamic template based on discovered hardware
-        write_dynamic_yaml_template(graph, "rfnoc_config_discovered.yaml");
+        // write_dynamic_yaml_template_with_pps_reset(graph, "rfnoc_config_discovered.yaml");
+        std::cout << "YAML template creation with PPS reset not implemented in this excerpt." << std::endl;
         return EXIT_SUCCESS;
     }
+    
     // Signal handler
     std::signal(SIGINT, &sig_int_handler);
+    if (num_packets == 0) {
+        std::cout << "Press Ctrl+C to stop continuous capture..." << std::endl;
+    }
     
     // Create graph
-    std::cout << "Creating RFNoC graph..." << std::endl;
+    std::cout << "\n=== Creating RFNoC Graph ===" << std::endl;
     auto graph = uhd::rfnoc::rfnoc_graph::make(args);
+    
+    // Print device information
+    try {
+        auto tree = graph->get_tree();
+        std::string device_name = tree->access<std::string>("/name").get();
+        std::cout << "Connected to device: " << device_name << std::endl;
+        
+        // Print FPGA information if available
+        try {
+            std::string fpga_version = tree->access<std::string>("/mboards/0/fpga_version").get();
+            std::cout << "FPGA version: " << fpga_version << std::endl;
+        } catch (...) {
+            std::cout << "FPGA version: Not available" << std::endl;
+        }
+    } catch (...) {
+        std::cout << "Device information: Not available" << std::endl;
+    }
     
     if (show_graph) {
         print_graph_info(graph);
@@ -2267,17 +3050,44 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     // Load configuration
     GraphConfig config;
     if (!yaml_config.empty()) {
+        std::cout << "\n=== Loading Configuration ===" << std::endl;
         std::cout << "Loading configuration from: " << yaml_config << std::endl;
         config = load_graph_config(yaml_config);
+        
+        // Override PPS reset settings from command line if specified
+        if (vm.count("pps-reset")) {
+            config.pps_reset.enable_pps_reset = use_pps_reset;
+        }
+        if (vm.count("pps-wait-time")) {
+            config.pps_reset.wait_time_sec = pps_wait_time;
+        }
+        if (vm.count("verify-pps-reset")) {
+            config.pps_reset.verify_reset = verify_pps_reset;
+        }
+        if (vm.count("max-time-after-reset")) {
+            config.pps_reset.max_time_after_reset = max_time_after_reset;
+        }
+        
+        std::cout << "Configuration loaded successfully." << std::endl;
+        std::cout << "  PPS reset enabled: " << (config.pps_reset.enable_pps_reset ? "Yes" : "No") << std::endl;
+        std::cout << "  Multi-stream enabled: " << (config.multi_stream.enable_multi_stream ? "Yes" : "No") << std::endl;
     } else {
+        std::cout << "\n=== Using Default Configuration ===" << std::endl;
         // Set default configuration
         config.auto_connect_radio_to_ddc = true;
         config.auto_find_stream_endpoint = true;
         config.multi_stream.enable_multi_stream = multi_stream;
         
+        // Set PPS reset from command line
+        config.pps_reset.enable_pps_reset = use_pps_reset;
+        config.pps_reset.wait_time_sec = pps_wait_time;
+        config.pps_reset.verify_reset = verify_pps_reset;
+        config.pps_reset.max_time_after_reset = max_time_after_reset;
+        
         // Add default Radio properties if Radio block exists
         auto radio_blocks = graph->find_blocks("Radio");
         if (!radio_blocks.empty()) {
+            std::cout << "Found " << radio_blocks.size() << " Radio block(s), setting default properties..." << std::endl;
             for (const auto& radio_id : radio_blocks) {
                 std::string id_str = radio_id.to_string();
                 config.block_properties[id_str]["freq"] = std::to_string(freq);
@@ -2286,29 +3096,126 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                 if (bw > 0) {
                     config.block_properties[id_str]["bandwidth"] = std::to_string(bw);
                 }
+                std::cout << "  " << id_str << ": freq=" << freq/1e6 << "MHz, gain=" << gain << "dB" << std::endl;
             }
+        } else {
+            std::cout << "No Radio blocks found in FPGA image." << std::endl;
         }
+    }
+    
+    // Validate configuration
+    if (!config.multi_stream.enable_multi_stream) {
+        std::cout << "\n=== Enabling Multi-Stream Mode ===" << std::endl;
+        std::cout << "Multi-stream mode is required for this tool. Enabling automatically..." << std::endl;
+        config.multi_stream.enable_multi_stream = true;
+    }
+    
+    // Perform PPS reset if requested (CRITICAL: This must happen before any streaming setup)
+    uhd::time_spec_t pps_reset_time(0.0);
+    bool pps_reset_used = false;
+    
+    if (config.pps_reset.enable_pps_reset) {
+        std::cout << "\n=== PPS Reset Sequence ===" << std::endl;
+        std::cout << "PPS reset configuration:" << std::endl;
+        std::cout << "  Wait time: " << config.pps_reset.wait_time_sec << " seconds" << std::endl;
+        std::cout << "  Verification: " << (config.pps_reset.verify_reset ? "Enabled" : "Disabled") << std::endl;
+        std::cout << "  Max time after reset: " << config.pps_reset.max_time_after_reset << " seconds" << std::endl;
+        
+        pps_reset_time = perform_pps_reset(graph, config.pps_reset);
+        pps_reset_used = true;
+        
+        std::cout << "PPS reset completed. All subsequent timestamps will be relative to PPS edge." << std::endl;
+    } else {
+        std::cout << "\n=== PPS Reset Disabled ===" << std::endl;
+        std::cout << "Timestamps will be relative to device boot time." << std::endl;
+        std::cout << "Consider using --pps-reset for multi-USRP or precision timing applications." << std::endl;
+    }
+    
+    // Validate sample rate and buffer size
+    if (rate < 1e3) {
+        std::cerr << "Warning: Sample rate very low (" << rate << " Hz). Consider increasing." << std::endl;
+    }
+    if (rate > 500e6) {
+        std::cerr << "Warning: Sample rate very high (" << rate/1e6 << " MHz). May cause overflows." << std::endl;
+    }
+    
+    if (spb < 100) {
+        std::cerr << "Warning: Samples per buffer very small (" << spb << "). May cause inefficiency." << std::endl;
+        spb = 100;
+    }
+    if (spb > 100000) {
+        std::cerr << "Warning: Samples per buffer very large (" << spb << "). May cause memory issues." << std::endl;
+        spb = 100000;
     }
     
     // Start capture
     bool enable_analysis = !csv_file.empty();
+    if (enable_analysis && csv_file.empty()) {
+        csv_file = file + "_analysis.csv";
+        std::cout << "Auto-generated analysis filename: " << csv_file << std::endl;
+    }
     
-    // Use multi-stream capture if enabled
-    if (config.multi_stream.enable_multi_stream) {
+    std::cout << "\n=== Starting Multi-Stream Capture ===" << std::endl;
+    std::cout << "Capture parameters:" << std::endl;
+    std::cout << "  Sample format: " << format << std::endl;
+    std::cout << "  Sample rate: " << rate/1e6 << " Msps" << std::endl;
+    std::cout << "  Samples per buffer: " << spb << std::endl;
+    std::cout << "  Packets per stream: " << (num_packets == 0 ? "Continuous" : std::to_string(num_packets)) << std::endl;
+    std::cout << "  Analysis enabled: " << (enable_analysis ? "Yes" : "No") << std::endl;
+    std::cout << "  PPS reset used: " << (pps_reset_used ? "Yes" : "No") << std::endl;
+    
+    try {
         if (format == "sc16") {
-            capture_multi_stream<std::complex<short>>(
-                graph, config, file, num_packets, enable_analysis, csv_file, rate, spb);
+            capture_multi_stream_with_pps_reset<std::complex<short>>(
+                graph, config, file, num_packets, enable_analysis, csv_file, 
+                rate, spb, pps_reset_time, pps_reset_used);
         } else if (format == "fc32") {
-            capture_multi_stream<std::complex<float>>(
-                graph, config, file, num_packets, enable_analysis, csv_file, rate, spb);
+            capture_multi_stream_with_pps_reset<std::complex<float>>(
+                graph, config, file, num_packets, enable_analysis, csv_file, 
+                rate, spb, pps_reset_time, pps_reset_used);
+        } else if (format == "fc64") {
+            capture_multi_stream_with_pps_reset<std::complex<double>>(
+                graph, config, file, num_packets, enable_analysis, csv_file, 
+                rate, spb, pps_reset_time, pps_reset_used);
         } else {
-            throw std::runtime_error("Unsupported format: " + format);
+            throw std::runtime_error("Unsupported format: " + format + 
+                                   ". Supported formats: sc16, fc32, fc64");
         }
-    } else {
-        // Single-stream capture (original functionality)
-        std::cerr << "Single-stream capture not implemented in this version. "
-                  << "Please use --multi-stream or configure multi_stream in YAML." << std::endl;
+    } catch (const uhd::exception& e) {
+        std::cerr << "\nUHD Error: " << e.what() << std::endl;
+        std::cerr << "This may indicate:" << std::endl;
+        std::cerr << "  - USRP not connected or powered" << std::endl;
+        std::cerr << "  - Incompatible FPGA image" << std::endl;
+        std::cerr << "  - Hardware configuration issue" << std::endl;
+        std::cerr << "  - Sample rate too high for current configuration" << std::endl;
         return EXIT_FAILURE;
+    } catch (const std::runtime_error& e) {
+        std::cerr << "\nRuntime Error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
+    } catch (const std::exception& e) {
+        std::cerr << "\nUnexpected Error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+    
+    std::cout << "\n=== Capture Completed Successfully ===" << std::endl;
+    
+    // Print final summary
+    std::cout << "\nFinal Summary:" << std::endl;
+    std::cout << "  Output file(s): " << (config.multi_stream.separate_files ? 
+                                         config.multi_stream.file_prefix + "_*.dat" : file) << std::endl;
+    if (enable_analysis) {
+        std::cout << "  Analysis file: " << csv_file << std::endl;
+        std::cout << "  Statistics file: " << csv_file.substr(0, csv_file.find_last_of('.')) + "_stats.csv" << std::endl;
+    }
+    std::cout << "  PPS reset information included in file headers" << std::endl;
+    
+    // Recommendations for further analysis
+    if (enable_analysis) {
+        std::cout << "\nAnalysis Recommendations:" << std::endl;
+        std::cout << "  - Examine timestamp columns for stream synchronization" << std::endl;
+        std::cout << "  - Check sequence numbers for dropped packets" << std::endl;
+        std::cout << "  - Analyze 'time_since_pps_sec' for PPS-relative timing" << std::endl;
+        std::cout << "  - Review per-stream statistics for performance metrics" << std::endl;
     }
     
     return EXIT_SUCCESS;

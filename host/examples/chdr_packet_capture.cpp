@@ -400,10 +400,11 @@ void analyze_packets(const std::vector<chdr_packet_data>& packets,
     }
     
     // Write CSV header - added time_since_pps_seconds column
-    csv << "packet_num,vc,eob,eov,pkt_type,pkt_type_str,num_mdata,seq_num,length,"
-        << "dst_epid,has_timestamp,timestamp_ticks,timestamp_sec,time_since_pps_seconds,payload_size,"
-        << "num_samples,first_4_bytes_hex,sample_0_real,sample_0_imag,"
-        << "sample_1_real,sample_1_imag" << std::endl;
+    csv << "packet_num,     vc,                 eob,            eov,                    pkt_type,"
+        << "pkt_type_str,   num_mdata,          seq_num,        ength,                  dst_epid,"
+        << "has_timestamp,  timestamp_ticks,    timestamp_sec,  time_since_pps_seconds, payload_size,"
+        << "num_samples,    first_4_bytes_hex,  sample_0_real,  sample_0_imag,          sample_1_real,"
+        << "sample_1_imag" << std::endl;
     
     uint64_t first_pkt_offset=0;
     uint64_t first_pkt_sec_ticks =0;
@@ -413,6 +414,7 @@ void analyze_packets(const std::vector<chdr_packet_data>& packets,
     }
     std::cout << "Here's the First first_packet integer sample  value is : " << first_pkt_sec_ticks <<"\n\n"<< std::endl;
     std::cout << "Here's the First first_packet tick value is : " << first_pkt_offset <<"\n\n"<< std::endl;
+    
     // Analyze each packet
     for (size_t i = 0; i < packets.size(); ++i) {
         const auto& pkt = packets[i];
