@@ -63,23 +63,164 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <array>
 #include <ctime>
 #include <iomanip>
 #include <numeric>
 
+// -------------------------------------------------------------------------------------------------
+// Local helper macro: cache‑line size (for alignment) – fallback 64B.
+#ifndef CACHELINE_BYTES
+#define CACHELINE_BYTES 64
+#endif
+
 #define DEFAULT_TICKRATE 200000000
 #define MAX_ANALYSIS_PACKETS 1000000
+#define DEFAULT_RING_BUFFER_SIZE (1024 * 1024 * 16)  // 16MB default ring buffer per stream
 
 namespace po = boost::program_options;
 using namespace std::chrono_literals;
 
-// Global flag for Ctrl+C handling
-static volatile bool stop_signal_called = false;
-void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph);
-void sig_int_handler(int)
-{
-    stop_signal_called = true;
+// Global flag for Ctrl+C handling (thread safe version)
+static std::atomic_bool stop_signal_called{false};
+static std::vector<std::atomic_bool*> g_per_stream_stop_flags; // non‑owning
+
+void sig_int_handler(int) {
+    stop_signal_called.store(true, std::memory_order_relaxed);
+    // propagate to per‑stream flags so writer threads exit promptly
+    for (auto* f : g_per_stream_stop_flags) {
+        if (f) f->store(true, std::memory_order_relaxed);
+    }
 }
+
+void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph);
+// void sig_int_handler(int)
+// {
+//     stop_signal_called.store(true);
+// }
+
+// ============================================================================
+// Lock-free SPSC Ring Buffer Implementation
+// ============================================================================
+
+template<typename T>
+class SPSCRingBuffer {
+public:
+    SPSCRingBuffer(size_t capacity) 
+        : capacity_(capacity)
+        , mask_(capacity - 1)
+        , buffer_(std::make_unique<T[]>(capacity))
+        , write_pos_(0)
+        , read_pos_(0)
+        , cached_read_pos_(0)
+        , cached_write_pos_(0)
+    {
+        // Ensure capacity is power of 2
+        if ((capacity & (capacity - 1)) != 0) {
+            throw std::invalid_argument("Ring buffer capacity must be power of 2");
+        }
+    }
+
+    bool push(T&& item) {
+        const auto current_write = write_pos_.load(std::memory_order_relaxed);
+        const auto next_write = (current_write + 1) & mask_;
+        
+        // Check if buffer is full
+        if (next_write == cached_read_pos_) {
+            cached_read_pos_ = read_pos_.load(std::memory_order_acquire);
+            if (next_write == cached_read_pos_) {
+                return false; // Buffer full
+            }
+        }
+        
+        buffer_[current_write] = std::move(item);
+        write_pos_.store(next_write, std::memory_order_release);
+        return true;
+    }
+
+    bool pop(T& item) {
+        const auto current_read = read_pos_.load(std::memory_order_relaxed);
+        
+        // Check if buffer is empty
+        if (current_read == cached_write_pos_) {
+            cached_write_pos_ = write_pos_.load(std::memory_order_acquire);
+            if (current_read == cached_write_pos_) {
+                return false; // Buffer empty
+            }
+        }
+        
+        item = std::move(buffer_[current_read]);
+        read_pos_.store((current_read + 1) & mask_, std::memory_order_release);
+        return true;
+    }
+
+    size_t size() const {
+        auto write = write_pos_.load(std::memory_order_acquire);
+        auto read = read_pos_.load(std::memory_order_acquire);
+        if (write >= read) {
+            return write - read;
+        } else {
+            return capacity_ - read + write;
+        }
+    }
+
+    bool empty() const {
+        return write_pos_.load(std::memory_order_acquire) == 
+               read_pos_.load(std::memory_order_acquire);
+    }
+
+    bool full() const {
+        auto write = write_pos_.load(std::memory_order_acquire);
+        auto read = read_pos_.load(std::memory_order_acquire);
+        return ((write + 1) & mask_) == read;
+    }
+
+    size_t capacity() const { return capacity_; }
+
+private:
+    const size_t capacity_;
+    const size_t mask_;
+    std::unique_ptr<T[]> buffer_;
+    
+    // Separate cache lines for producer and consumer
+    alignas(CACHELINE_BYTES) std::atomic<size_t> write_pos_;
+    alignas(CACHELINE_BYTES) std::atomic<size_t> read_pos_;
+    
+    // Cached positions to avoid false sharing
+    alignas(CACHELINE_BYTES) size_t cached_read_pos_;
+    alignas(CACHELINE_BYTES) size_t cached_write_pos_;
+};
+
+// ============================================================================
+// Packet Buffer Structure for Ring Buffer
+// ============================================================================
+
+struct PacketBuffer {
+    std::vector<uint8_t> data;
+    size_t stream_id;
+    uint64_t packet_number;
+    uhd::time_spec_t timestamp;
+    bool has_timestamp;
+    
+    PacketBuffer() : stream_id(0), packet_number(0), has_timestamp(false) {}
+    
+    PacketBuffer(const PacketBuffer&)            = default;  // deep copy OK (vector copies)
+    PacketBuffer& operator=(const PacketBuffer&) = default;
+    PacketBuffer(PacketBuffer&&) noexcept        = default;
+    PacketBuffer& operator=(PacketBuffer&&) noexcept = default;
+};
+
+// ============================================================================
+// Stream Buffer Configuration
+// ============================================================================
+
+struct StreamBufferConfig {
+    size_t ring_buffer_size = DEFAULT_RING_BUFFER_SIZE;
+    size_t batch_write_size = 100;  // Number of packets to batch before writing
+    bool enable_compression = false;
+    size_t high_water_mark = 90;    // Percentage full before warning
+    size_t low_water_mark = 10;     // Percentage full for low buffer warning
+};
 
 // CHDR packet types according to RFNoC spec
 enum chdr_packet_type_t {
@@ -164,6 +305,10 @@ struct MultiStreamConfig {
     size_t max_streams = 0;  // 0 = unlimited
     std::vector<std::string> stream_blocks;  // Specific blocks to stream from
     double sync_delay = 0.1;  // Delay before synchronized start (seconds)
+
+    // Ring buffer configuration
+    StreamBufferConfig buffer_config;
+    
 };
 
 // Per-stream capture statistics
@@ -179,6 +324,12 @@ struct StreamStats {
     double last_timestamp = 0.0;
     std::chrono::steady_clock::time_point start_time;
     std::chrono::steady_clock::time_point end_time;
+
+    // Ring buffer statistics
+    size_t buffer_overflows = 0;
+    size_t max_buffer_usage = 0;
+    size_t total_bytes_written = 0;
+    double avg_buffer_usage = 0.0;
 };
 
 // Stream capture context
@@ -197,6 +348,37 @@ struct StreamContext {
     bool separate_file;
     uhd::time_spec_t pps_reset_time;  // Time when PPS reset occurred
     bool pps_reset_used;
+
+    // Ring buffer for this stream
+    std::shared_ptr<SPSCRingBuffer<PacketBuffer>> ring_buffer;
+    
+    // File writer thread handle
+    std::unique_ptr<std::thread> writer_thread;
+    
+    // Output file path
+    std::string output_filename;
+    
+    // Buffer configuration
+    StreamBufferConfig buffer_config;
+
+    /* ------------------------------------------------------------------ *
+     *  rule of five – StreamContext is *move‑only* because it owns a     *
+     *  std::unique_ptr<std::thread>.                                     *
+     * ------------------------------------------------------------------ */
+    StreamContext()                                  = default;
+    StreamContext(const StreamContext&)              = delete;
+    StreamContext& operator=(const StreamContext&)   = delete;
+    StreamContext(StreamContext&&)                   = default;
+    StreamContext& operator=(StreamContext&&)        = default;
+};
+
+// File writer statistics
+struct FileWriterStats {
+    size_t packets_written = 0;
+    size_t bytes_written = 0;
+    size_t write_errors = 0;
+    std::chrono::steady_clock::time_point start_time;
+    std::chrono::steady_clock::time_point end_time;
 };
 
 // Connection info for YAML config
@@ -287,12 +469,13 @@ struct GraphTopology {
 // File header structure for CHDR capture files with PPS reset support
 struct ChdrFileHeader {
     uint32_t magic = 0x43484452;  // "CHDR"
-    uint32_t version = 4;          // Version 4 includes multi-stream and PPS reset info
+    uint32_t version = 4;          // Version 4 includes ring buffer support, multi-stream and PPS reset info
     uint32_t chdr_width = 64;
     double tick_rate = DEFAULT_TICKRATE;
     uint32_t pps_reset_used = 0;
     double pps_reset_time_sec = 0.0;
     uint32_t num_streams = 0;
+    uint32_t ring_buffer_used = 1;  // New field
     uint32_t reserved[5] = {0};    // Reserved for future use
 };
 
@@ -301,6 +484,7 @@ struct StreamHeader {
     uint32_t stream_id;
     char block_id[64];
     uint32_t port;
+    uint32_t ring_buffer_size;  // New field
     uint32_t reserved[5] = {0};
 };
 
@@ -417,6 +601,334 @@ T read_le(const uint8_t* data) {
     }
     return value;
 }
+
+// ============================================================================
+// File Writer Thread Function
+// ============================================================================
+
+void file_writer_thread(
+    StreamContext& ctx,
+    std::atomic<bool>& stop_writing,
+    FileWriterStats& writer_stats)
+{
+    writer_stats.start_time = std::chrono::steady_clock::now();
+    
+    // Set thread priority for file I/O
+    uhd::set_thread_priority_safe(0.5, true);
+    
+    // Open output file
+    std::ofstream output_file(ctx.output_filename, std::ios::binary);
+    if (!output_file.is_open()) {
+        std::cerr << "[Writer " << ctx.stream_id << "] Failed to open file: " 
+                  << ctx.output_filename << std::endl;
+        return;
+    }
+    
+    // Write file header
+    ChdrFileHeader header;
+    header.tick_rate = ctx.tick_rate;
+    header.pps_reset_used = ctx.pps_reset_used ? 1 : 0;
+    header.pps_reset_time_sec = ctx.pps_reset_time.get_real_secs();
+    header.num_streams = 1;  // One stream per file
+    header.ring_buffer_used = 1;
+    output_file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    
+    // Write stream header
+    StreamHeader stream_header;
+    stream_header.stream_id = static_cast<uint32_t>(ctx.stream_id);
+    std::strncpy(stream_header.block_id, ctx.block_id.c_str(), sizeof(stream_header.block_id) - 1);
+    stream_header.block_id[sizeof(stream_header.block_id) - 1] = '\0';
+    stream_header.port = static_cast<uint32_t>(ctx.port);
+    stream_header.ring_buffer_size = static_cast<uint32_t>(ctx.ring_buffer->capacity());
+    output_file.write(reinterpret_cast<const char*>(&stream_header), sizeof(stream_header));
+    
+    std::cout << "[Writer " << ctx.stream_id << "] Started file writer for " 
+              << ctx.output_filename << std::endl;
+    
+    // Buffer for batched writes
+    std::vector<PacketBuffer> write_batch;
+    write_batch.reserve(ctx.buffer_config.batch_write_size);
+    
+    // Main write loop
+    while (!stop_writing.load() || !ctx.ring_buffer->empty()) {
+        PacketBuffer packet;
+        
+        // Try to fill the batch
+        while (write_batch.size() < ctx.buffer_config.batch_write_size && 
+               ctx.ring_buffer->pop(packet)) {
+            write_batch.push_back(packet);
+        }
+        
+        // Write batch if we have data
+        if (!write_batch.empty()) {
+            try {
+                for (const auto& pkt : write_batch) {
+                    uint32_t pkt_size = static_cast<uint32_t>(pkt.data.size());
+                    output_file.write(reinterpret_cast<const char*>(&pkt_size), sizeof(pkt_size));
+                    output_file.write(reinterpret_cast<const char*>(pkt.data.data()), pkt.data.size());
+                    
+                    writer_stats.packets_written++;
+                    writer_stats.bytes_written += sizeof(pkt_size) + pkt.data.size();
+                }
+                
+                write_batch.clear();
+            } catch (const std::exception& e) {
+                std::cerr << "[Writer " << ctx.stream_id << "] Write error: " << e.what() << std::endl;
+                writer_stats.write_errors++;
+            }
+        } else if (stop_writing.load() && ctx.ring_buffer->empty()) {
+            break;  // Exit if we're done and buffer is empty
+        } else {
+            // No data available, sleep briefly
+            std::this_thread::sleep_for(1ms);
+        }
+        
+        // Update buffer usage statistics
+        size_t current_usage = ctx.ring_buffer->size();
+        if (current_usage > ctx.stats.max_buffer_usage) {
+            ctx.stats.max_buffer_usage = current_usage;
+        }
+        
+        // Check for high water mark
+        size_t usage_percent = (current_usage * 100) / ctx.ring_buffer->capacity();
+        if (usage_percent >= ctx.buffer_config.high_water_mark) {
+            std::cout << "[Writer " << ctx.stream_id << "] WARNING: Buffer usage at " 
+                      << usage_percent << "%" << std::endl;
+        }
+    }
+    
+    // Final flush of any remaining packets
+    while (!ctx.ring_buffer->empty()) {
+        PacketBuffer packet;
+        if (ctx.ring_buffer->pop(packet)) {
+            try {
+                uint32_t pkt_size = static_cast<uint32_t>(packet.data.size());
+                output_file.write(reinterpret_cast<const char*>(&pkt_size), sizeof(pkt_size));
+                output_file.write(reinterpret_cast<const char*>(packet.data.data()), packet.data.size());
+                
+                writer_stats.packets_written++;
+                writer_stats.bytes_written += sizeof(pkt_size) + packet.data.size();
+            } catch (const std::exception& e) {
+                std::cerr << "[Writer " << ctx.stream_id << "] Final write error: " << e.what() << std::endl;
+                writer_stats.write_errors++;
+            }
+        }
+    }
+    
+    output_file.close();
+    writer_stats.end_time = std::chrono::steady_clock::now();
+    
+    double duration = std::chrono::duration<double>(writer_stats.end_time - writer_stats.start_time).count();
+    std::cout << "[Writer " << ctx.stream_id << "] Stopped. Wrote " 
+              << writer_stats.packets_written << " packets (" 
+              << writer_stats.bytes_written / (1024.0 * 1024.0) << " MB) in "
+              << duration << " seconds" << std::endl;
+    
+    if (writer_stats.write_errors > 0) {
+        std::cout << "[Writer " << ctx.stream_id << "] Write errors: " 
+                  << writer_stats.write_errors << std::endl;
+    }
+}
+
+// ============================================================================
+// Enhanced Capture Stream Function with Ring Buffer
+// ============================================================================
+
+template <typename samp_type>
+void capture_stream_ringbuffer(StreamContext& ctx, 
+                              std::atomic<bool>& start_capture,
+                              std::atomic<bool>& stop_writing,
+                              size_t num_packets,
+                              FileWriterStats& writer_stats) {
+    
+    // Set thread priority for capture
+    uhd::set_thread_priority_safe(1.0, true);
+    
+    // Wait for synchronized start if needed
+    while (!start_capture.load()) {
+        std::this_thread::sleep_for(1ms);
+    }
+    
+    ctx.stats.start_time = std::chrono::steady_clock::now();
+    
+    // Setup buffers
+    std::vector<samp_type> buff(ctx.samps_per_buff);
+    std::vector<void*> buff_ptrs = {&buff.front()};
+    uhd::rx_metadata_t md;
+    
+    // Stream command
+    uhd::stream_cmd_t stream_cmd(num_packets == 0 ? 
+        uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS :
+        uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE);
+    
+    if (num_packets > 0) {
+        stream_cmd.num_samps = num_packets * ctx.samps_per_buff;
+    }
+    
+    stream_cmd.stream_now = true;
+    ctx.rx_streamer->issue_stream_cmd(stream_cmd);
+    
+    std::cout << "[Stream " << ctx.stream_id << "] Started capture from " 
+              << ctx.block_id << ":" << ctx.port 
+              << " with ring buffer size: " << ctx.ring_buffer->capacity() << std::endl;
+    
+    // Main capture loop
+    size_t consecutive_timeouts = 0;
+    const size_t max_consecutive_timeouts = 5;
+    
+    while (!stop_signal_called.load() && (num_packets == 0 ||
+        ctx.stats.packets_captured < num_packets)) {
+        size_t num_rx_samps = ctx.rx_streamer->recv(buff_ptrs, ctx.samps_per_buff, md, 3.0);
+        
+        // Handle errors
+        if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+            consecutive_timeouts++;
+            if (consecutive_timeouts >= max_consecutive_timeouts) {
+                std::cout << "[Stream " << ctx.stream_id << "] Multiple timeouts, stopping stream" << std::endl;
+                break;
+            }
+            continue;
+        } else {
+            consecutive_timeouts = 0;  // Reset timeout counter
+        }
+        
+        if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW) {
+            ctx.stats.overflow_count++;
+            continue;
+        }
+        if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+            std::cerr << "[Stream " << ctx.stream_id << "] Receiver error: " 
+                      << md.strerror() << std::endl;
+            ctx.stats.error_count++;
+            break;
+        }
+        
+        if (num_rx_samps == 0) continue;
+        
+        // Build CHDR packet
+        PacketBuffer packet_buffer;
+        packet_buffer.stream_id = ctx.stream_id;
+        packet_buffer.packet_number = ctx.stats.packets_captured;
+        
+        // Calculate sizes
+        size_t payload_bytes = num_rx_samps * sizeof(samp_type);
+        size_t header_bytes = 8;
+        size_t timestamp_bytes = md.has_time_spec ? 8 : 0;
+        size_t total_chdr_bytes = header_bytes + timestamp_bytes + payload_bytes;
+        
+        // Reserve space
+        packet_buffer.data.reserve(total_chdr_bytes);
+        
+        // Build header
+        uint64_t header = 0;
+        header |= (uint64_t)ctx.stream_id & 0xFFFF;
+        header |= ((uint64_t)total_chdr_bytes & 0xFFFF) << 16;
+        header |= ((uint64_t)ctx.stats.packets_captured & 0xFFFF) << 32;
+        header |= ((uint64_t)0 & 0x1F) << 48;
+        header |= ((uint64_t)(md.has_time_spec ? PKT_TYPE_DATA_WITH_TS : PKT_TYPE_DATA_NO_TS) & 0x7) << 53;
+        header |= ((uint64_t)(md.end_of_burst ? 1 : 0) & 0x1) << 57;
+        
+        // Write header
+        write_le(packet_buffer.data, header);
+        
+        // Write timestamp if present
+        uint64_t timestamp_ticks = 0;
+        if (md.has_time_spec) {
+            timestamp_ticks = md.time_spec.to_ticks(ctx.tick_rate);
+            write_le(packet_buffer.data, timestamp_ticks);
+            packet_buffer.has_timestamp = true;
+            packet_buffer.timestamp = md.time_spec;
+            
+            // Track timestamps
+            double timestamp_sec = md.time_spec.get_real_secs();
+            if (ctx.stats.first_timestamp == 0.0) {
+                ctx.stats.first_timestamp = timestamp_sec;
+            }
+            ctx.stats.last_timestamp = timestamp_sec;
+        }
+        
+        // Write payload
+        const uint8_t* sample_bytes = reinterpret_cast<const uint8_t*>(buff.data());
+        packet_buffer.data.insert(packet_buffer.data.end(), sample_bytes, sample_bytes + payload_bytes);
+        
+        // Push to ring buffer
+        if (!ctx.ring_buffer->push(std::move(packet_buffer))) {
+            ctx.stats.buffer_overflows++;
+            if (ctx.stats.buffer_overflows % 100 == 0) {
+                std::cerr << "[Stream " << ctx.stream_id << "] Ring buffer overflow! Total: " 
+                          << ctx.stats.buffer_overflows << std::endl;
+            }
+        }
+        
+        // Store for analysis if needed
+        if (ctx.analysis_packets && ctx.analysis_packets->size() < MAX_ANALYSIS_PACKETS) {
+            chdr_packet_data pkt;
+            pkt.stream_id = ctx.stream_id;
+            pkt.stream_block = ctx.block_id;
+            pkt.stream_port = ctx.port;
+            pkt.header_raw = header;
+            pkt.parse_header();
+            
+            if (md.has_time_spec) {
+                pkt.timestamp = timestamp_ticks;
+            }
+            pkt.payload.assign(sample_bytes, sample_bytes + payload_bytes);
+            
+            std::lock_guard<std::mutex> lock(*ctx.analysis_mutex);
+            ctx.analysis_packets->push_back(pkt);
+        }
+        
+        // Update statistics
+        ctx.stats.packets_captured++;
+        ctx.stats.total_samples += num_rx_samps;
+        ctx.stats.total_bytes_written += packet_buffer.data.size();
+        
+        // Progress update
+        if (ctx.stats.packets_captured % 1000 == 0) {
+            size_t buffer_usage = ctx.ring_buffer->size();
+            size_t buffer_percent = (buffer_usage * 100) / ctx.ring_buffer->capacity();
+            
+            std::cout << "[Stream " << ctx.stream_id << "] Packets: " 
+                      << ctx.stats.packets_captured 
+                      << ", Samples: " << ctx.stats.total_samples
+                      << ", Buffer: " << buffer_percent << "%";
+            if (ctx.stats.overflow_count > 0) {
+                std::cout << " (RF-O: " << ctx.stats.overflow_count << ")";
+            }
+            if (ctx.stats.buffer_overflows > 0) {
+                std::cout << " (Buf-O: " << ctx.stats.buffer_overflows << ")";
+            }
+            std::cout << std::endl;
+        }
+    }
+    
+    // Stop streaming
+    stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
+    ctx.rx_streamer->issue_stream_cmd(stream_cmd);
+    
+    ctx.stats.end_time = std::chrono::steady_clock::now();
+    
+    // Signal writer thread to finish
+    stop_writing.store(true);
+    
+    // Final statistics
+    double elapsed_secs = std::chrono::duration<double>(ctx.stats.end_time - ctx.stats.start_time).count();
+    std::cout << "\n[Stream " << ctx.stream_id << "] Capture complete:" << std::endl;
+    std::cout << "  Block: " << ctx.block_id << ":" << ctx.port << std::endl;
+    std::cout << "  Packets: " << ctx.stats.packets_captured << std::endl;
+    std::cout << "  Samples: " << ctx.stats.total_samples << std::endl;
+    std::cout << "  Duration: " << elapsed_secs << " seconds" << std::endl;
+    std::cout << "  Average rate: " << (ctx.stats.total_samples/elapsed_secs)/1e6 << " Msps" << std::endl;
+    std::cout << "  Max buffer usage: " << ctx.stats.max_buffer_usage << "/" 
+              << ctx.ring_buffer->capacity() << " packets" << std::endl;
+    if (ctx.stats.overflow_count > 0) {
+        std::cout << "  RF Overflows: " << ctx.stats.overflow_count << std::endl;
+    }
+    if (ctx.stats.buffer_overflows > 0) {
+        std::cout << "  Buffer Overflows: " << ctx.stats.buffer_overflows << std::endl;
+    }
+}
+
 
 // Perform PPS reset to synchronize device time to 0
 uhd::time_spec_t perform_pps_reset(uhd::rfnoc::rfnoc_graph::sptr graph, 
@@ -2067,7 +2579,8 @@ void capture_stream(StreamContext& ctx,
               << ctx.block_id << ":" << ctx.port << std::endl;
     
     // Main capture loop
-    while (!stop_signal_called && (num_packets == 0 || ctx.stats.packets_captured < num_packets)) {
+    while (!stop_signal_called.load() && (num_packets == 0 ||
+        ctx.stats.packets_captured < num_packets)) {
         size_t num_rx_samps = ctx.rx_streamer->recv(buff_ptrs, ctx.samps_per_buff, md, 3.0);
         
         // Handle errors
@@ -2370,7 +2883,7 @@ void capture_multi_stream(
             ctx.samps_per_buff = samps_per_buff;
             ctx.separate_file = config.multi_stream.separate_files;
             
-            contexts.push_back(ctx);
+            contexts.push_back(std::move(ctx));
             
         } catch (const std::exception& e) {
             std::cerr << "Failed to setup stream " << i << ": " << e.what() << std::endl;
@@ -2682,7 +3195,7 @@ void capture_multi_stream_with_pps_reset(
             ctx.pps_reset_time = pps_reset_time;
             ctx.pps_reset_used = pps_reset_used;
             
-            contexts.push_back(ctx);
+            contexts.push_back(std::move(ctx));
             
         } catch (const std::exception& e) {
             std::cerr << "Failed to setup stream " << i << ": " << e.what() << std::endl;
@@ -2782,10 +3295,10 @@ void capture_multi_stream_with_pps_reset(
     }
     
     // Print capture progress periodically
-    std::thread progress_thread([&contexts, &stop_signal_called]() {
-        while (!stop_signal_called) {
+    std::thread progress_thread([&contexts, stop_flag = &stop_signal_called]() {
+        while (!stop_flag->load()) {
             std::this_thread::sleep_for(5s);
-            if (stop_signal_called) break;
+            if (stop_flag->load(std::memory_order_relaxed)) break;
             
             std::cout << "\n=== Capture Progress ===" << std::endl;
             for (const auto& ctx : contexts) {
@@ -2806,7 +3319,7 @@ void capture_multi_stream_with_pps_reset(
     }
     
     // Stop progress thread
-    stop_signal_called = true;
+    stop_signal_called.store(true);
     if (progress_thread.joinable()) {
         progress_thread.join();
     }
@@ -2912,12 +3425,304 @@ void capture_multi_stream_with_pps_reset(
     }
 }
 
+template <typename samp_type>
+void capture_multi_stream_ringbuffer(
+    uhd::rfnoc::rfnoc_graph::sptr graph,
+    const GraphConfig& config,
+    const std::string& file,
+    size_t num_packets,
+    bool enable_analysis,
+    const std::string& csv_file,
+    double rate,
+    size_t samps_per_buff,
+    uhd::time_spec_t pps_reset_time,
+    bool pps_reset_used)
+{
+    // Print initial graph state
+    print_graph_info(graph);
+    
+    // Initialize blocks and configure graph (same as original)
+    // ... [Graph initialization code remains the same] ...
+    
+    // Find streaming endpoints
+    auto endpoints = find_all_stream_endpoints_enhanced(graph, config.stream_endpoints, config.multi_stream);
+    
+    if (endpoints.empty()) {
+        throw std::runtime_error("No suitable streaming endpoints found");
+    }
+    
+    std::cout << "\nFound " << endpoints.size() << " streaming endpoints:" << std::endl;
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        std::cout << "  Stream " << i << ": " << endpoints[i].first 
+                  << ":" << endpoints[i].second << std::endl;
+    }
+    
+    // Get tick rate
+    double tick_rate = DEFAULT_TICKRATE;
+    auto radio_blocks = graph->find_blocks("Radio");
+    if (!radio_blocks.empty()) {
+        auto radio = graph->get_block<uhd::rfnoc::radio_control>(radio_blocks[0]);
+        tick_rate = radio->get_tick_rate();
+    }
+    
+    // Create contexts and ring buffers
+    std::vector<StreamContext> contexts;
+    std::vector<chdr_packet_data> all_analysis_packets;
+    std::mutex analysis_mutex;
+    std::vector<std::atomic<bool>> stop_writing_flags;
+    std::vector<FileWriterStats> writer_stats;
+    
+    // Initialize contexts with ring buffers
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        const auto& [block_id, port] = endpoints[i];
+        
+        std::cout << "Setting up stream " << i << " for " << block_id << ":" << port << std::endl;
+        
+        try {
+            uhd::rfnoc::block_id_t endpoint_id(block_id);
+            
+            // Verify endpoint exists
+            auto endpoint_block = graph->get_block(endpoint_id);
+            if (!endpoint_block || port >= endpoint_block->get_num_output_ports()) {
+                std::cerr << "Warning: " << block_id << " port " << port 
+                        << " doesn't exist in current FPGA image" << std::endl;
+                continue;
+            }
+            
+            // Create stream args
+            uhd::stream_args_t stream_args("sc16", "sc16");
+            stream_args.channels = {0};
+            stream_args.args = uhd::device_addr_t();
+            
+            // Apply stream args from config
+            for (const auto& sep : config.stream_endpoints) {
+                if (sep.block_id == block_id && sep.port == port) {
+                    for (const auto& [key, value] : sep.stream_args) {
+                        stream_args.args[key] = value;
+                    }
+                    break;
+                }
+            }
+            
+            // Create RX streamer
+            auto rx_streamer = graph->create_rx_streamer(1, stream_args);
+            
+            // Connect streamer to endpoint
+            graph->connect(block_id, port, rx_streamer, 0, true);
+            
+            std::cout << "  Connected RX streamer to " << block_id << ":" << port << std::endl;
+            
+            // Create context with ring buffer
+            StreamContext ctx;
+            ctx.stream_id = i;
+            ctx.block_id = block_id;
+            ctx.port = port;
+            ctx.rx_streamer = rx_streamer;
+            ctx.stats.stream_id = i;
+            ctx.stats.block_id = block_id;
+            ctx.stats.port = port;
+            ctx.analysis_packets = enable_analysis ? &all_analysis_packets : nullptr;
+            ctx.analysis_mutex = &analysis_mutex;
+            ctx.tick_rate = tick_rate;
+            ctx.samps_per_buff = samps_per_buff;
+            ctx.pps_reset_time = pps_reset_time;
+            ctx.pps_reset_used = pps_reset_used;
+            ctx.buffer_config = config.multi_stream.buffer_config;
+            
+            // Create ring buffer
+            // size_t ring_buffer_size = config.multi_stream.buffer_config.ring_buffer_size / sizeof(PacketBuffer);
+            // // Ensure power of 2
+            // size_t power_of_2 = 1;
+            // while (power_of_2 < ring_buffer_size) power_of_2 <<= 1;
+            // ctx.ring_buffer = std::make_shared<SPSCRingBuffer<PacketBuffer>>(power_of_2);
+
+            // ring_buffer_size is bytes (user MB). Estimate packet bytes ~ header(16) + payload.
+            const size_t bytes_per_samp = sizeof(samp_type);
+            const size_t est_payload_bytes = samps_per_buff * bytes_per_samp;
+            const size_t est_pkt_bytes     = est_payload_bytes + 16; // hdr+ts margin
+            size_t est_pkts = std::max<size_t>(1, config.multi_stream.buffer_config.ring_buffer_size / est_pkt_bytes);
+            // enforce minimum 2 and power‑of‑2 for mask math
+            size_t power_of_2 = 1;
+            while (power_of_2 < est_pkts) power_of_2 <<= 1;
+            if (power_of_2 < 2) power_of_2 = 2;
+            ctx.ring_buffer = std::make_shared<SPSCRingBuffer<PacketBuffer>>(power_of_2);
+            std::cout << "  Ring capacity(pkts): " << power_of_2 << " (~" << (power_of_2*est_pkt_bytes)/(1024.0*1024.0) << " MB est)" << std::endl;
+            
+            // Set output filename
+            ctx.output_filename = config.multi_stream.file_prefix + "_" + std::to_string(i) + ".dat";
+            
+            contexts.push_back(std::move(ctx));
+            // stop_writing_flags.emplace_back(false);
+            // writer_stats.emplace_back();
+            
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to setup stream " << i << ": " << e.what() << std::endl;
+        }
+    }
+    
+    // After loop, register flags for SIGINT propagation:
+    g_per_stream_stop_flags.clear();
+    g_per_stream_stop_flags.reserve(contexts.size());
+    for (size_t i = 0; i < contexts.size(); ++i) {
+        g_per_stream_stop_flags.push_back(&stop_writing_flags[i]);
+    }
+
+    // Commit graph
+    std::cout << "\nCommitting graph..." << std::endl;
+    graph->commit();
+    
+    // Set block properties after commit
+    if (!config.block_properties.empty()) {
+        apply_block_properties(graph, config.block_properties, rate);
+    }
+    
+    // Create and start file writer threads
+    std::cout << "\nStarting file writer threads..." << std::endl;
+    for (size_t i = 0; i < contexts.size(); ++i) {
+        contexts[i].writer_thread.reset(new std::thread(
+                                        file_writer_thread,
+                                        std::ref(contexts[i]),
+                                        std::ref(stop_writing_flags[i]),
+                                        std::ref(writer_stats[i]))
+        );
+    }
+    
+    // Create capture threads
+    std::vector<std::thread> capture_threads;
+    std::atomic<bool> start_capture(false);
+    
+    // Start capture threads
+    for (size_t i = 0; i < contexts.size(); ++i) {
+        capture_threads.emplace_back(
+            capture_stream_ringbuffer<samp_type>,
+            std::ref(contexts[i]),
+            std::ref(start_capture),
+            std::ref(stop_writing_flags[i]),
+            num_packets,
+            std::ref(writer_stats[i])
+        );
+    }
+    
+    // Synchronize start if requested
+    if (config.multi_stream.sync_streams) {
+        std::cout << "\nSynchronizing streams..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::duration<double>(config.multi_stream.sync_delay));
+    }
+    
+    // Start all captures
+    auto overall_start = std::chrono::steady_clock::now();
+    start_capture.store(true);
+    std::cout << "\nStarting multi-stream capture with ring buffers..." << std::endl;
+    
+    // Monitor thread for buffer statistics
+    std::thread monitor_thread([&contexts, stop_flag = &stop_signal_called]() {
+        while (!stop_flag->load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(10s);
+            if (stop_flag->load(std::memory_order_relaxed)) break;
+            
+            std::cout << "\n=== Ring Buffer Status ===" << std::endl;
+            for (const auto& ctx : contexts) {
+                size_t buffer_size = ctx.ring_buffer->size();
+                size_t buffer_capacity = ctx.ring_buffer->capacity();
+                size_t buffer_percent = (buffer_size * 100) / buffer_capacity;
+                
+                std::cout << "[Stream " << ctx.stream_id << "] Buffer: " 
+                          << buffer_size << "/" << buffer_capacity 
+                          << " (" << buffer_percent << "%)" << std::endl;
+            }
+        }
+    });
+    
+    // Wait for all capture threads to complete
+    for (auto& thread : capture_threads) {
+        thread.join();
+    }
+    
+    // Stop monitor thread
+    stop_signal_called.store(true);
+    if (monitor_thread.joinable()) {
+        monitor_thread.join();
+    }
+    
+    // Wait for all writer threads to complete
+    std::cout << "\nWaiting for file writers to finish..." << std::endl;
+    for (auto& ctx : contexts) {
+        if (ctx.writer_thread && ctx.writer_thread->joinable()) {
+            ctx.writer_thread->join();
+        }
+    }
+    
+    auto overall_end = std::chrono::steady_clock::now();
+    double overall_duration = std::chrono::duration<double>(overall_end - overall_start).count();
+    
+    // Collect and print statistics
+    std::vector<StreamStats> all_stats;
+    size_t total_packets = 0;
+    size_t total_samples = 0;
+    size_t total_rf_overflows = 0;
+    size_t total_buffer_overflows = 0;
+    size_t total_bytes_written = 0;
+    
+    std::cout << "\n=== Multi-Stream Capture Statistics ===" << std::endl;
+    std::cout << "Total streams: " << contexts.size() << std::endl;
+    
+    for (size_t i = 0; i < contexts.size(); ++i) {
+        const auto& ctx = contexts[i];
+        const auto& ws = writer_stats[i];
+        
+        all_stats.push_back(ctx.stats);
+        total_packets += ctx.stats.packets_captured;
+        total_samples += ctx.stats.total_samples;
+        total_rf_overflows += ctx.stats.overflow_count;
+        total_buffer_overflows += ctx.stats.buffer_overflows;
+        total_bytes_written += ws.bytes_written;
+        
+        std::cout << "\nStream " << i << " (" << ctx.block_id << ":" << ctx.port << "):" << std::endl;
+        std::cout << "  Capture Statistics:" << std::endl;
+        std::cout << "    Packets captured: " << ctx.stats.packets_captured << std::endl;
+        std::cout << "    Total samples: " << ctx.stats.total_samples << std::endl;
+        std::cout << "    RF overflows: " << ctx.stats.overflow_count << std::endl;
+        std::cout << "    Buffer overflows: " << ctx.stats.buffer_overflows << std::endl;
+        std::cout << "    Max buffer usage: " << ctx.stats.max_buffer_usage 
+                  << "/" << ctx.ring_buffer->capacity() << " packets" << std::endl;
+        std::cout << "  File Writer Statistics:" << std::endl;
+        std::cout << "    Packets written: " << ws.packets_written << std::endl;
+        std::cout << "    Bytes written: " << ws.bytes_written / (1024.0 * 1024.0) << " MB" << std::endl;
+        std::cout << "    Write errors: " << ws.write_errors << std::endl;
+    }
+    
+    std::cout << "\nOverall Statistics:" << std::endl;
+    std::cout << "  Total packets: " << total_packets << std::endl;
+    std::cout << "  Total samples: " << total_samples << std::endl;
+    std::cout << "  Total duration: " << overall_duration << " seconds" << std::endl;
+    std::cout << "  Aggregate sample rate: " << (total_samples/overall_duration)/1e6 << " Msps" << std::endl;
+    std::cout << "  Total data written: " << total_bytes_written / (1024.0 * 1024.0 * 1024.0) << " GB" << std::endl;
+    std::cout << "  Total RF overflows: " << total_rf_overflows << std::endl;
+    std::cout << "  Total buffer overflows: " << total_buffer_overflows << std::endl;
+    
+    // Perform analysis if requested
+    if (enable_analysis && !csv_file.empty() && !all_analysis_packets.empty()) {
+        std::cout << "\nAnalyzing packets..." << std::endl;
+        
+        std::sort(all_analysis_packets.begin(), all_analysis_packets.end(),
+                 [](const chdr_packet_data& a, const chdr_packet_data& b) {
+                     if (a.stream_id != b.stream_id) return a.stream_id < b.stream_id;
+                     return a.seq_num < b.seq_num;
+                 });
+        
+        analyze_packets_with_pps_reset(all_analysis_packets, csv_file, tick_rate, 
+                                     all_stats, pps_reset_time, pps_reset_used, samps_per_buff, rate);
+    }
+    
+    std::cout << "\nMulti-stream capture with ring buffers completed successfully!" << std::endl;
+}
+
 // Main function updated with complete PPS reset support
 int UHD_SAFE_MAIN(int argc, char* argv[])
 {
     // Variables
     std::string args, file, format, csv_file, yaml_config;
-    size_t num_packets, spb;
+    size_t num_packets, spb, ring_buffer_mb, batch_write_size;
     double rate, freq, gain, bw;
     bool analyze_only = false;
     bool show_graph = false;
@@ -2944,6 +3749,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("bw", po::value<double>(&bw)->default_value(0.0), "analog bandwidth")
         ("format", po::value<std::string>(&format)->default_value("sc16"), "sample format")
         ("spb", po::value<size_t>(&spb)->default_value(2000), "samples per buffer")
+        ("ring-buffer-mb", po::value<size_t>(&ring_buffer_mb)->default_value(16), "ring buffer size in MB per stream")
+        ("batch-write-size", po::value<size_t>(&batch_write_size)->default_value(100), "packets to batch before writing")
         ("show-graph", po::value<bool>(&show_graph)->default_value(false), "print RFNoC graph info and exit")
         ("analyze-only", po::value<bool>(&analyze_only)->default_value(false), "only analyze existing file")
         ("create-yaml-template", po::value<bool>(&create_yaml_template)->default_value(false), "create YAML template")
@@ -2988,6 +3795,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         std::cout << "    " << argv[0] << " --multi-stream --pps-reset --num-packets 0 --yaml config.yaml" << std::endl;
         std::cout << "  High-rate capture with verification disabled:" << std::endl;
         std::cout << "    " << argv[0] << " --multi-stream --pps-reset --verify-pps-reset false --rate 50e6" << std::endl;
+        std::cout << "  High-rate capture with large buffers:" << std::endl;
+        std::cout << "    " << argv[0] << " --yaml config.yaml --rate 200e6 --ring-buffer-mb 256 --batch-write-size 1000" << std::endl;
         return EXIT_SUCCESS;
     }
     
@@ -3068,6 +3877,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             config.pps_reset.max_time_after_reset = max_time_after_reset;
         }
         
+
         std::cout << "Configuration loaded successfully." << std::endl;
         std::cout << "  PPS reset enabled: " << (config.pps_reset.enable_pps_reset ? "Yes" : "No") << std::endl;
         std::cout << "  Multi-stream enabled: " << (config.multi_stream.enable_multi_stream ? "Yes" : "No") << std::endl;
@@ -3079,6 +3889,17 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         config.multi_stream.enable_multi_stream = multi_stream;
         
         // Set PPS reset from command line
+        config.pps_reset.enable_pps_reset = use_pps_reset;
+        config.pps_reset.wait_time_sec = pps_wait_time;
+        config.pps_reset.verify_reset = verify_pps_reset;
+        config.pps_reset.max_time_after_reset = max_time_after_reset;
+
+        // Override buffer settings from command line
+        config.multi_stream.buffer_config.ring_buffer_size = ring_buffer_mb * 1024 * 1024;
+        config.multi_stream.buffer_config.batch_write_size = batch_write_size;
+        config.multi_stream.separate_files = true;  // Always use separate files with ring buffers
+        
+        // Configure PPS reset
         config.pps_reset.enable_pps_reset = use_pps_reset;
         config.pps_reset.wait_time_sec = pps_wait_time;
         config.pps_reset.verify_reset = verify_pps_reset;
@@ -3157,6 +3978,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     
     std::cout << "\n=== Starting Multi-Stream Capture ===" << std::endl;
     std::cout << "Capture parameters:" << std::endl;
+    std::cout << "  Ring buffer size per stream: " << ring_buffer_mb << " MB" << std::endl;
+    std::cout << "  Batch write size: " << batch_write_size << " packets" << std::endl;
     std::cout << "  Sample format: " << format << std::endl;
     std::cout << "  Sample rate: " << rate/1e6 << " Msps" << std::endl;
     std::cout << "  Samples per buffer: " << spb << std::endl;
@@ -3166,15 +3989,15 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     
     try {
         if (format == "sc16") {
-            capture_multi_stream_with_pps_reset<std::complex<short>>(
+            capture_multi_stream_ringbuffer<std::complex<short>>(
                 graph, config, file, num_packets, enable_analysis, csv_file, 
                 rate, spb, pps_reset_time, pps_reset_used);
         } else if (format == "fc32") {
-            capture_multi_stream_with_pps_reset<std::complex<float>>(
+            capture_multi_stream_ringbuffer<std::complex<float>>(
                 graph, config, file, num_packets, enable_analysis, csv_file, 
                 rate, spb, pps_reset_time, pps_reset_used);
         } else if (format == "fc64") {
-            capture_multi_stream_with_pps_reset<std::complex<double>>(
+            capture_multi_stream_ringbuffer<std::complex<double>>(
                 graph, config, file, num_packets, enable_analysis, csv_file, 
                 rate, spb, pps_reset_time, pps_reset_used);
         } else {

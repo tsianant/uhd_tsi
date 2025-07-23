@@ -7,7 +7,7 @@
 multi_stream:
   enable: true
   sync_streams: true
-  separate_files: false
+  separate_files: true
   file_prefix: "stream"
   max_streams: 0
   sync_delay: 0.1
