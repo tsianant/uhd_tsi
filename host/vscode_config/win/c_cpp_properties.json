@@ -1,0 +1,51 @@
+
+{
+    "configurations": [
+        {
+            "name": "Win64",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/include/**",
+                "${workspaceFolder}/lib/**",
+                "${workspaceFolder}/utils/**",
+                "${workspaceFolder}/host/include/**",
+                "${workspaceFolder}/host/lib/**",
+                "${workspaceFolder}/host/utils/**",
+                "C:/Program Files/boost/include/**",
+                "C:/local/boost_1_87_0/**",
+                "C:/boost/**",
+                "C:/Program Files/libusb/include/**",
+                "C:/local/libusb-1.0.28/include/**",
+                "C:/libusb/**",
+                "${env:CONDA_PREFIX}/include/**",
+                "${env:CONDA_PREFIX}/Library/include/**",
+                //pybind11 specfic include
+                "${env:CONDA_PREFIX}/Lib/site-packages/pybind11/include/**",
+                "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/*/include",
+                "C:/Program Files (x86)/Windows Kits/10/Include/*/um",
+                "C:/Program Files (x86)/Windows Kits/10/Include/*/ucrt",
+                "C:/Program Files (x86)/Windows Kits/10/Include/*/shared",
+                "C:/Program Files (x86)/Windows Kits/10/Include/*/winrt",
+                "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/*/include"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE",
+                "WIN64",
+                "_WIN64",
+                "_WINDOWS",
+                "NOMINMAX",
+                "BOOST_ALL_NO_LIB",
+                "BOOST_ALL_DYN_LINK",
+                "_CRT_SECURE_NO_WARNINGS"
+            ],
+            "compilerPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.16.27023\\bin\\HostX64\\x64\\cl.exe",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-msvc-x64",
+            "configurationProvider": "ms-vscode.cmake-tools"
+        }
+    ],
+    "version": 4
+}
