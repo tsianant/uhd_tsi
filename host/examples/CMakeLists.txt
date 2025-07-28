@@ -7,6 +7,7 @@
 
 include(FetchContent)
 
+# Fetch yaml-cpp using FetchContent
 FetchContent_Declare(
   yaml-cpp
   GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
@@ -38,18 +39,21 @@ set(example_sources
     gpio.cpp
     spi.cpp
     sync_to_gps.cpp
-    raw_chdr_capture.cpp
     rfnoc_stream_tool.cpp
     rfnoc_nullsource_ce_rx.cpp
     rfnoc_rx_to_file.cpp
     rfnoc_radio_loopback.cpp
     rfnoc_replay_samples_from_file.cpp
-    chdr_packet_capture.cpp
     #benchmark_streamer.cpp
 )
 
-pkg_check_modules(YAML_CPP REQUIRED yaml-cpp)
-
+# Add PCAP-dependent examples only if libpcap is found
+if(PCAP_FOUND)
+    list(APPEND example_sources 
+        raw_chdr_capture.cpp
+        chdr_packet_capture.cpp
+    )
+endif()
 
 if(ENABLE_OCTOCLOCK)
     list(APPEND example_sources test_clock_synch.cpp)
@@ -59,8 +63,21 @@ endif(ENABLE_OCTOCLOCK)
 foreach(example_source ${example_sources})
     get_filename_component(example_name ${example_source} NAME_WE)
     add_executable(${example_name} ${example_source})
-    target_link_libraries(${example_name} uhd ${Boost_LIBRARIES} ${PCAP_LIBRARIES} ${YAML_CPP_LIBRARIES})
-    target_include_directories(${example_name} PRIVATE ${YAML_CPP_INCLUDE_DIRS})
+    
+    # Base libraries that all examples need
+    target_link_libraries(${example_name} uhd ${Boost_LIBRARIES})
+    
+    # Add yaml-cpp for rfnoc_stream_tool using modern CMake target
+    if(${example_name} STREQUAL "rfnoc_stream_tool")
+        target_link_libraries(${example_name} yaml-cpp::yaml-cpp)
+    endif()
+    
+    # Add libpcap for packet capture examples
+    if(PCAP_FOUND AND (${example_name} STREQUAL "raw_chdr_capture" OR ${example_name} STREQUAL "chdr_packet_capture"))
+        target_link_libraries(${example_name} ${PCAP_LIBRARIES})
+        target_include_directories(${example_name} PRIVATE ${PCAP_INCLUDE_DIRS})
+    endif()
+    
     UHD_INSTALL(TARGETS ${example_name} RUNTIME DESTINATION ${PKG_LIB_DIR}/examples COMPONENT examples)
 endforeach(example_source)
 
