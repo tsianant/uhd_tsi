@@ -14,7 +14,7 @@
             },
             "group": {
                 "kind": "build",
-                "isDefault": true
+                // "isDefault": true
             },
             "detail": "Build entire project in debug mode",
             "problemMatcher": ["$msvc"],
@@ -38,11 +38,48 @@
             "dependsOn": "CMake: Configure Release"
         },
         {
+            "label": "CMake: Build All (RelWithDebInfo)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build", "build",
+                "--config", "RelWithDebInfo",
+                "-j8"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "Build entire project in release mode",
+            "problemMatcher": ["$msvc"],
+            "dependsOn": "CMake: Configure Release"
+        },
+        {
             "label": "CMake: Build RFNOC Stream Tool",
             "type": "shell",
             "command": "cmake",
             "args": [
                 "--build", "build",
+                "--target", "rfnoc_stream_tool",
+                "-j8"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "detail": "Build only the RFNOC Stream Tool application",
+            "problemMatcher": ["$msvc"]
+        },
+        {
+            "label": "CMake: Build RFNOC Stream Tool (RelWithDebInfo)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build", "build",
+                "--config", "RelWithDebInfo",
                 "--target", "rfnoc_stream_tool",
                 "-j8"
             ],

@@ -2841,10 +2841,10 @@ void capture_multi_stream_with_pps_reset(
     }
     
     // Print capture progress periodically
-    std::thread progress_thread([&contexts, &stop_signal_called]() {
-        while (!stop_signal_called) {
+    std::thread progress_thread([&contexts]() {
+        while (!stop_signal_called.load()) {
             std::this_thread::sleep_for(5s);
-            if (stop_signal_called) break;
+            if (stop_signal_called.load()) break;
             
             std::cout << "\n=== Capture Progress ===" << std::endl;
             for (const auto& ctx : contexts) {

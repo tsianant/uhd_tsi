@@ -2,6 +2,35 @@
   "version": "2.0.0",
   "configurations": [
     {
+      "name": "Debug rfnoc_stream_tool (RelWithDebInfo build)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/examples/RelWithDebInfo/rfnoc_stream_tool.exe",
+      "args": [
+        "--args", "addr=192.168.10.2",
+        "--yaml", "examples/rfnoc_4xddc_static_config.yaml",
+        "--file", "ddc_capture.dat",
+        "--csv", "ddc_analysis.csv",
+        "--num-packets", "5000",
+        "--rate", "200000",
+        "--spb", "200",
+        "--ring-buffer-mb", "32",
+        "--batch-write-size", "200",
+        "--multi-stream=1",
+        "--pps-reset=1"
+      ],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {"PATH": "${workspaceFolder}\\build\\lib;${workspaceFolder}\\build\\plugins;${env:PATH}"},
+        {"UHD_LOG_LEVEL": "debug"},
+        {"PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"}
+      ],
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "preLaunchTask": "Build (RelWithDebInfo)",
+      "symbolSearchPath": "${workspaceFolder}/build"
+    },
+    {
       "name": "Debug rfnoc_stream_tool (Debug build)",
       "type": "cppvsdbg",
       "request": "launch",
@@ -23,7 +52,7 @@
       "environment": [
         {"PATH": "${workspaceFolder}\\build\\lib;${workspaceFolder}\\build\\plugins;${env:PATH}"},
         {"UHD_LOG_LEVEL": "debug"},
-        {"PYTHONPATH": "C:/Users/<YOU>/anaconda3/Lib/site-packages"}
+        {"PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"}
       ],
       "console": "integratedTerminal",
       "stopAtEntry": false,

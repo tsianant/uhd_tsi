@@ -99,15 +99,14 @@
         "ENABLE_RFNOC": "ON",
         "ENABLE_EXAMPLES": "ON",
         "ENABLE_UTILS": "ON",
-        "CMAKE_BUILD_TYPE": "Debug",
-        "RUNTIME_PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/python.exe",
-        "CMAKE_CONFIGURATION_TYPES": "Debug",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "RUNTIME_PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
+        "CMAKE_CONFIGURATION_TYPES": "RelWithDebInfo",
         "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
         "CMAKE_INSTALL_PREFIX": "${workspaceFolder}/install",
-        "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/python.exe",
-        "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/include",
-        "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/libs/python312.lib",
-                "PYTHON_LIBRARY_DEBUG": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/libs/python312.lib",
+        "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
+        "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/include",
+        "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/libs/python312.lib",
         "Boost_ROOT": "C:/local/boost_1_87_0",
         "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
         "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
@@ -117,10 +116,10 @@
     "cmake.environment": {
         "PATH": "${env:CONDA_PREFIX}/Scripts;${env:CONDA_PREFIX};${env:PATH}",
         "PYTHONPATH": "${env:CONDA_PREFIX}/Lib/site-packages",
-        "RUNTIME_PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/python.exe"
+        "RUNTIME_PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe"
     },
     "cmake.buildArgs": [
-        "--parallel", "8"
+        // "--parallel", "8"
     ],
     "terminal.integrated.env.windows": {
         "PATH": "${env:CONDA_PREFIX}/Scripts;${env:CONDA_PREFIX};${env:PATH}",
