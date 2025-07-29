@@ -34,7 +34,7 @@
       "name": "Debug rfnoc_stream_tool (Release build)",
       "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build/release/examples/Release/rfnoc_stream_tool.exe",
+      "program": "${workspaceFolder}/build/examples/Release/rfnoc_stream_tool.exe",
       "args": ["--help"],
       "cwd": "${workspaceFolder}",
       "environment": [

@@ -17,9 +17,10 @@
                 "ENABLE_EXAMPLES": "ON",
                 "ENABLE_UTILS": "ON",
                 "ENABLE_TESTS": "ON",
-                "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
-                "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/include",
-                "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/libs/python312.lib",
+                "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/python.exe",
+                "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/include",
+                "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/libs/python312.lib",
+                "PYTHON_LIBRARY_DEBUG": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/libs/python312.lib",
                 "Boost_ROOT": "C:/local/boost_1_87_0",
                 "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
                 "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
@@ -29,8 +30,8 @@
                 "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
             },
             "environment": {
-                "PATH": "$env{CONDA_PREFIX}/Scripts;$env{CONDA_PREFIX};$env{PATH}",
-                "PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"
+                "PATH": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/Scripts;$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP;$env{PATH}",
+                "PYTHONPATH": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/Lib/site-packages"
             }
         },
         {
@@ -49,9 +50,10 @@
                 "ENABLE_EXAMPLES": "ON",
                 "ENABLE_UTILS": "ON",
                 "ENABLE_TESTS": "OFF",
-                "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
-                "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/include",
-                "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/libs/python312.lib",
+                "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/python.exe",
+                "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/include",
+                "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/libs/python312.lib",
+                "PYTHON_LIBRARY_DEBUG": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/libs/python312.lib",
                 "Boost_ROOT": "C:/local/boost_1_87_0",
                 "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
                 "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
@@ -61,8 +63,8 @@
                 "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
             },
             "environment": {
-                "PATH": "$env{CONDA_PREFIX}/Scripts;$env{CONDA_PREFIX};$env{PATH}",
-                "PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"
+                "PATH": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/Scripts;$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP;$env{PATH}",
+                "PYTHONPATH": "$env{CONDA_PREFIX}/envs/py312_d_UHD_BACKUP/Lib/site-packages"
             }
         }
     ],
