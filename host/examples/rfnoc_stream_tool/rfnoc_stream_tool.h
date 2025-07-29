@@ -459,7 +459,7 @@ struct StreamHeader {
 
 
 void sig_int_handler(int);
-void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph);
+// void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph);
 std::vector<BlockInfo> discover_blocks_enhanced(uhd::rfnoc::rfnoc_graph::sptr graph);
 bool auto_connect_radio_to_ddc(uhd::rfnoc::rfnoc_graph::sptr graph);
 template<typename T>
@@ -503,7 +503,7 @@ bool configure_switchboards(uhd::rfnoc::rfnoc_graph::sptr graph,
 bool apply_dynamic_connections(uhd::rfnoc::rfnoc_graph::sptr graph,
                               const std::vector<ConnectionConfig>& connections,
                               bool commit_after_each = false);
-void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph);
+void print_graph_info(const uhd::rfnoc::rfnoc_graph::sptr& graph);
 void analyze_packets_with_pps_reset(const std::vector<chdr_packet_data>& packets, 
                                     const std::string& csv_file,
                                     double tick_rate,

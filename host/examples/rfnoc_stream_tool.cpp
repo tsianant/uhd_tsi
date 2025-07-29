@@ -24,7 +24,7 @@ void sig_int_handler(int) {
     }
 }
 
-void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph);
+void print_graph_info(const uhd::rfnoc::rfnoc_graph::sptr& graph);
 // void sig_int_handler(int)
 // {
 //     stop_signal_called.store(true);
@@ -1751,7 +1751,7 @@ bool apply_dynamic_connections(uhd::rfnoc::rfnoc_graph::sptr graph,
 }
 
 // Print enhanced graph information
-void print_graph_info(uhd::rfnoc::rfnoc_graph::sptr graph) {
+void print_graph_info(const uhd::rfnoc::rfnoc_graph::sptr& graph) {
     std::cout << "\n=== RFNoC Graph Information ===" << std::endl;
     
     // Print blocks with more details
