@@ -1,0 +1,137 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "windows-RelWithDebInfo",
+            "displayName": "Windows RelWithDebInfo",
+            "description": "RelWithDebInfo build configuration for Windows with Anaconda Python",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_CONFIGURATION_TYPES": "RelWithDebInfo",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install",
+                "ENABLE_PYTHON_API": "ON",
+                "ENABLE_RFNOC": "ON",
+                "ENABLE_EXAMPLES": "ON",
+                "ENABLE_UTILS": "ON",
+                "ENABLE_TESTS": "ON",
+                "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
+                "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/include",
+                "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/libs/python312.lib",
+                "Boost_ROOT": "C:/local/boost_1_87_0",
+                "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
+                "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
+                "LIBUSB_INCLUDE_DIRS": "C:/local/libusb-1.0.28/include",
+                "LIBUSB_LIBRARIES": "C:/local/libusb-1.0.28/VS2022/MS64/static",
+                "pybind11_DIR": "${env:CONDA_PREFIX}/Lib/site-packages/pybind11",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
+                "ENABLE_SIM": "OFF",
+                "ENABLE_MPMD": "OFF"
+            },
+            "environment": {
+                "PATH": "$env{CONDA_PREFIX}/Scripts;$env{CONDA_PREFIX};$env{PATH}",
+                "PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"
+            }
+        },
+        {
+            "name": "windows-debug",
+            "displayName": "Windows Debug",
+            "description": "Debug build configuration for Windows with Anaconda Python",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CONFIGURATION_TYPES": "Debug",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install",
+                "ENABLE_PYTHON_API": "ON",
+                "ENABLE_RFNOC": "ON",
+                "ENABLE_EXAMPLES": "ON",
+                "ENABLE_UTILS": "ON",
+                "ENABLE_TESTS": "ON",
+                "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
+                "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/include",
+                "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/libs/python312.lib",
+                "Boost_ROOT": "C:/local/boost_1_87_0",
+                "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
+                "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
+                "LIBUSB_INCLUDE_DIRS": "C:/local/libusb-1.0.28/include",
+                "LIBUSB_LIBRARIES": "C:/local/libusb-1.0.28/VS2022/MS64/static",
+                "pybind11_DIR": "${env:CONDA_PREFIX}/Lib/site-packages/pybind11",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
+                "ENABLE_SIM": "OFF",
+                "ENABLE_MPMD": "OFF"
+            },
+            "environment": {
+                "PATH": "$env{CONDA_PREFIX}/Scripts;$env{CONDA_PREFIX};$env{PATH}",
+                "PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"
+            }
+        },
+        {
+            "name": "windows-release",
+            "displayName": "Windows Release",
+            "description": "Release build configuration for Windows with Anaconda Python",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_CONFIGURATION_TYPES": "Debug",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install",
+                "ENABLE_PYTHON_API": "ON",
+                "ENABLE_RFNOC": "ON",
+                "ENABLE_EXAMPLES": "ON",
+                "ENABLE_UTILS": "ON",
+                "ENABLE_TESTS": "OFF",
+                "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
+                "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/include",
+                "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/libs/python312.lib",
+                "Boost_ROOT": "C:/local/boost_1_87_0",
+                "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
+                "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
+                "LIBUSB_INCLUDE_DIRS": "C:/local/libusb-1.0.28/include",
+                "LIBUSB_LIBRARIES": "C:/local/libusb-1.0.28/VS2022/MS64/static/libusb-1.0.lib",
+                "pybind11_DIR": "${env:CONDA_PREFIX}/Lib/site-packages/pybind11",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
+                "ENABLE_SIM": "OFF",
+                "ENABLE_MPMD": "OFF"
+            },
+            "environment": {
+                "PATH": "$env{CONDA_PREFIX}/Scripts;$env{CONDA_PREFIX};$env{PATH}",
+                "PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "windows-debug",
+            "displayName": "Windows Debug Build",
+            "configurePreset": "windows-debug",
+            "configuration": "Debug",
+            "jobs": 4
+        },
+        {
+            "name": "windows-release",
+            "displayName": "Windows Release Build",
+            "configurePreset": "windows-release", 
+            "configuration": "Release",
+            "jobs": 4
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "windows-debug-test",
+            "displayName": "Windows Debug Tests",
+            "configurePreset": "windows-debug",
+            "configuration": "Debug"
+        },
+        {
+            "name": "windows-release-test",
+            "displayName": "Windows Release Tests",
+            "configurePreset": "windows-release",
+            "configuration": "Release"
+        }
+    ]
+}
