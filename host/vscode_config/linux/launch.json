@@ -1,0 +1,93 @@
+{
+    "configurations": [
+        {
+            "name": "Linux Debug RFNOC Stream (Interactive)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/examples/rfnoc_stream_tool",
+            "args": [
+                "--args",
+                "addr=192.168.10.2",
+                "--yaml",
+                "examples/rfnoc_4xddc_static_config.yaml",
+                "--file",
+                "ddc_capture8.dat",
+                "--csv",
+                "ddc_analysis8.csv",
+                "--num-packets",
+                "5000",
+                "--rate=200000",
+                "--spb",
+                "200",
+                "--ring-buffer-mb",
+                "32",
+                "--batch-write-size",
+                "200",
+                "--multi-stream=1",
+                "--pps-reset=1"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "LD_LIBRARY_PATH",
+                    "value": "${workspaceFolder}/build/lib:${workspaceFolder}/build/plugins:${env:LD_LIBRARY_PATH}"
+                },
+                {
+                    "name": "UHD_LOG_LEVEL",
+                    "value": "debug"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "CMake: Build All (Debug)",
+            "miDebuggerPath": "/usr/bin/gdb"
+        },
+        {
+            "name": "Linux Debug RFNOC Stream (Help)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/examples/rfnoc_stream_tool",
+            "args": [
+                "--help"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "LD_LIBRARY_PATH",
+                    "value": "${workspaceFolder}/build/lib:${workspaceFolder}/build/plugins:${env:LD_LIBRARY_PATH}"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "CMake: Build RFNOC Stream Tool",
+            "miDebuggerPath": "/usr/bin/gdb"
+        }
+    ],
+    "version": "2.0.0"
+}
