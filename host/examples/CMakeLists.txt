@@ -81,6 +81,55 @@ foreach(example_source ${example_sources})
     UHD_INSTALL(TARGETS ${example_name} RUNTIME DESTINATION ${PKG_LIB_DIR}/examples COMPONENT examples)
 endforeach(example_source)
 
+
+# ------------------------------------------------------------
+#  installation – binary + all its shared‑library deps
+# ------------------------------------------------------------
+include(GNUInstallDirs)
+
+# Always install the executable itself
+install(TARGETS rfnoc_stream_tool
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# ---------- shared‑lib dependency copy -----------------------
+# CMake ≥ 3.17 provides file(GET_RUNTIME_DEPENDENCIES)
+# but we must run it *after* the tool has been built.
+set(_copy_deps_script  "${CMAKE_CURRENT_BINARY_DIR}/copy_runtime_deps.cmake")
+
+file(WRITE "${_copy_deps_script}" [=[
+# --------------- copy_runtime_deps.cmake ------------------
+file(GET_RUNTIME_DEPENDENCIES
+     EXECUTABLES  "$<TARGET_FILE:rfnoc_stream_tool>"
+     RESOLVED_DEPENDENCIES_VAR  deps
+     UNRESOLVED_DEPENDENCIES_VAR bad)
+
+foreach(path IN LISTS deps)
+  get_filename_component(fname "${path}" NAME)
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}"
+              TYPE FILE FILES "${path}")
+endforeach()
+]=])
+
+# Tell CMake to run that helper script *during install*
+install(CODE "include(\"${_copy_deps_script}\")")
+
+# ------------------------------------------------------------
+#  CPack packaging
+# ------------------------------------------------------------
+set(CPACK_PACKAGE_NAME    "rfnoc_stream_tool")
+set(CPACK_PACKAGE_VERSION "0.1.0")
+set(CPACK_PACKAGE_VENDOR  "tsianant")
+
+if (WIN32)
+    set(CPACK_GENERATOR "ZIP;NSIS")
+    set(CPACK_PACKAGE_FILE_NAME "rfnoc_stream_tool-${CPACK_PACKAGE_VERSION}-win64")
+else()
+    set(CPACK_GENERATOR "TGZ;DEB;RPM")
+    set(CPACK_PACKAGE_FILE_NAME "rfnoc_stream_tool-${CPACK_PACKAGE_VERSION}-linux-x86_64")
+endif()
+
+include(CPack)                              # enables `package` target
+
 ########################################################################
 # ASCII Art DFT - requires curses, so this part is optional
 ########################################################################
