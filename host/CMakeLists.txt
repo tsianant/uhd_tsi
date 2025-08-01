@@ -27,6 +27,9 @@ set(CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}" CACHE STRING "")
 # Force UHD_RELEASE_MODE to be a string for cmake-gui
 set(UHD_RELEASE_MODE "${UHD_RELEASE_MODE}" CACHE STRING "UHD Release Mode")
 
+if(ENABLE_STATIC_LIBS)
+    set(CPACK_GENERATOR "NSIS")
+endif()
 
 ########################################################################
 # Project setup

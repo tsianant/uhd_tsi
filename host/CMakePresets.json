@@ -105,28 +105,101 @@
             "architecture": "x64",
             "binaryDir": "${sourceDir}/build-static",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE":               "Release",
-                "CMAKE_CONFIGURATION_TYPES":      "Release",
-                "BUILD_SHARED_LIBS":              "OFF",
-                "ENABLE_STATIC_LIBS":             "ON",
-                "Boost_USE_STATIC_LIBS":          "ON",
-                "CMAKE_MSVC_RUNTIME_LIBRARY":     "MultiThreaded",
-                "ENABLE_UTILS":                   "OFF",
-                "ENABLE_TESTS":                   "OFF",
-                "ENABLE_SIM":                     "OFF",
-                "ENABLE_MPMD":                    "OFF",
-                "ENABLE_PYTHON_API":              "OFF",
-                "Boost_ROOT":                     "C:/local/boost_1_87_0",
-                "Boost_INCLUDE_DIR":              "C:/local/boost_1_87_0",
-                "Boost_LIBRARY_DIR":              "C:/local/boost_1_87_0/lib64-msvc-14.3",
-                "LIBUSB_INCLUDE_DIRS":            "C:/local/libusb-1.0.28/include",
-                "LIBUSB_LIBRARIES":               "C:/local/libusb-1.0.28/VS2022/MS64/static/libusb-1.0.lib",
-                "CMAKE_INSTALL_PREFIX":           "${sourceDir}/install-static",
-                "CMAKE_POLICY_VERSION_MINIMUM":   "3.5"
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_CONFIGURATION_TYPES": "Release",
+                "BUILD_SHARED_LIBS": "OFF",
+                "ENABLE_STATIC_LIBS": "ON",
+                "Boost_USE_STATIC_LIBS": "ON",
+                "yaml_cpp_BUILD_SHARED_LIBS": "OFF",
+                "CPACK_GENERATOR": "NSIS",
+                "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded",
+                "ENABLE_UTILS": "OFF",
+                "ENABLE_TESTS": "OFF",
+                "ENABLE_SIM": "OFF",
+                "ENABLE_MPMD": "OFF",
+                "ENABLE_PYTHON_API": "OFF",
+                "Boost_ROOT": "C:/local/boost_1_87_0",
+                "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
+                "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
+                "LIBUSB_INCLUDE_DIRS": "C:/local/libusb-1.0.28/include",
+                "LIBUSB_LIBRARIES": "C:/local/libusb-1.0.28/VS2022/MS64/static/libusb-1.0.lib",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install-static",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
             },
             "environment": {
                 "PATH": "$env{CONDA_PREFIX}/Scripts;$env{CONDA_PREFIX};$penv{PATH}",
                 "PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"
+            }
+        },
+        {
+            "name": "windows-static-RelWithDebInfo",
+            "displayName": "Windows Static RelWithDebInfo",
+            "description": "rfnoc_stream_tool + all deps statically linked (/MT)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build-static",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_CONFIGURATION_TYPES": "RelWithDebInfo",
+                "BUILD_SHARED_LIBS": "OFF",
+                "ENABLE_STATIC_LIBS": "ON",
+                "Boost_USE_STATIC_LIBS": "ON",
+                "yaml_cpp_BUILD_SHARED_LIBS": "OFF",
+                "CPACK_GENERATOR": "NSIS",
+                "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded",
+                "ENABLE_UTILS": "OFF",
+                "ENABLE_TESTS": "OFF",
+                "ENABLE_SIM": "OFF",
+                "ENABLE_MPMD": "OFF",
+                "ENABLE_PYTHON_API": "OFF",
+                "Boost_ROOT": "C:/local/boost_1_87_0",
+                "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
+                "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
+                "LIBUSB_INCLUDE_DIRS": "C:/local/libusb-1.0.28/include",
+                "LIBUSB_LIBRARIES": "C:/local/libusb-1.0.28/VS2022/MS64/static/libusb-1.0.lib",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install-static",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "environment": {
+                "PATH": "$env{CONDA_PREFIX}/Scripts;$env{CONDA_PREFIX};$penv{PATH}",
+                "PYTHONPATH": "$env{CONDA_PREFIX}/Lib/site-packages"
+            }
+        },
+        {
+            "name": "Configure preset using toolchain file",
+            "displayName": "Configure preset using toolchain file",
+            "description": "Sets Ninja generator, build and install directory",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_TOOLCHAIN_FILE": "",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
+            }
+        },
+        {
+            "name": "Visual Studio Community 2022 Preview - amd64",
+            "displayName": "Visual Studio Community 2022 Preview - amd64",
+            "description": "Using compilers for Visual Studio 17 2022 (x64 architecture)",
+            "generator": "Visual Studio 17 2022",
+            "toolset": "host=x64",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+                "CMAKE_C_COMPILER": "cl.exe",
+                "CMAKE_CXX_COMPILER": "cl.exe"
+            }
+        },
+        {
+            "name": "Custom configure preset",
+            "displayName": "Custom configure preset",
+            "description": "Sets Ninja generator, build and install directory",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
             }
         }
     ],
@@ -141,17 +214,41 @@
         {
             "name": "windows-release",
             "displayName": "Windows Release Build",
-            "configurePreset": "windows-release", 
+            "configurePreset": "windows-release",
             "configuration": "Release",
             "jobs": 4
         },
         {
-        "name":        "windows-static-release",
-        "displayName": "Windows Static Release Build",
-        "configurePreset": "windows-static-release",
-        "configuration":   "Release",
-        "jobs": 8,
-        "targets": [ "rfnoc_stream_tool" ]
+            "name": "windows-static-release-rfnoc",
+            "displayName": "Windows Static Release Build",
+            "configurePreset": "windows-static-release",
+            "configuration": "Release",
+            "jobs": 8,
+            "targets": [
+                "rfnoc_stream_tool"
+            ]
+        },
+        {
+            "name": "windows-static-RelWithDebInfo-rfnoc",
+            "displayName": "Windows Static RelWithDebInfo Build",
+            "configurePreset": "windows-static-RelWithDebInfo",
+            "configuration": "RelWithDebInfo",
+            "jobs": 8,
+            "targets": [
+                "rfnoc_stream_tool"
+            ]
+        },
+        {
+            "name": "windows-static-release_UNREADY",
+            "description": "",
+            "displayName": "",
+            "configurePreset": "windows-static-RelWithDebInfo"
+        },
+        {
+            "name": "Visual Studio Community 2022 Preview - amd64-debug",
+            "displayName": "Visual Studio Community 2022 Preview - amd64 - Debug",
+            "configurePreset": "Visual Studio Community 2022 Preview - amd64",
+            "configuration": "Debug"
         }
     ],
     "testPresets": [
@@ -171,9 +268,11 @@
     "packagePresets": [
         {
             "name": "windows-static-release-package",
-            "displayName": "Package (Static NSIS)",
-            "configurePreset": "windows-static-release",
-            "generators": [ "NSIS" ],
+            "displayName": "Package (Static NSIS)",
+            "configurePreset": "windows-static-RelWithDebInfo",
+            "generators": [
+                "NSIS"
+            ],
             "variables": {
                 "CPACK_NSIS_EXECUTABLE": "C:/Program Files (x86)/NSIS/makensis.exe"
             }

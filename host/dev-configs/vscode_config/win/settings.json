@@ -85,42 +85,6 @@
     "python.terminal.activateEnvInCurrentTerminal": true,
     "python.defaultInterpreterPath": "${env:CONDA_PREFIX}/python.exe",
     "python.venvPath": "${env:CONDA_PREFIX}/envs",
-    "cmake.configureOnOpen": false,
-    "cmake.buildDirectory": "${workspaceFolder}/build",
-    "cmake.sourceDirectory": "${workspaceFolder}/",
-    "cmake.generator": "Visual Studio 17 2022",
-    "cmake.platform": "x64",
-    "cmake.preferredGenerators": [
-        "Visual Studio 17 2022"
-    ],
-    "cmake.configureSettings": {
-      "CMAKE_GENERATOR_PLATFORM": "x64",
-        "ENABLE_PYTHON_API": "ON",
-        "ENABLE_RFNOC": "ON",
-        "ENABLE_EXAMPLES": "ON",
-        "ENABLE_UTILS": "ON",
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "RUNTIME_PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
-        "CMAKE_CONFIGURATION_TYPES": "RelWithDebInfo",
-        "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
-        "CMAKE_INSTALL_PREFIX": "${workspaceFolder}/install",
-        "PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
-        "PYTHON_INCLUDE_DIR": "$env{CONDA_PREFIX}/include",
-        "PYTHON_LIBRARY": "$env{CONDA_PREFIX}/libs/python312.lib",
-        "Boost_ROOT": "C:/local/boost_1_87_0",
-        "Boost_INCLUDE_DIR": "C:/local/boost_1_87_0",
-        "Boost_LIBRARY_DIR": "C:/local/boost_1_87_0/lib64-msvc-14.3",
-        "LIBUSB_INCLUDE_DIRS": "C:/local/libusb-1.0.28/include",
-        "LIBUSB_LIBRARIES": "C:/local/libusb-1.0.28/VS2022/MS64/static/libusb-1.0.lib"
-    },
-    "cmake.environment": {
-        "PATH": "${env:CONDA_PREFIX}/Scripts;${env:CONDA_PREFIX};${env:PATH}",
-        "PYTHONPATH": "${env:CONDA_PREFIX}/Lib/site-packages",
-        "RUNTIME_PYTHON_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe"
-    },
-    "cmake.buildArgs": [
-        // "--parallel", "8"
-    ],
     "terminal.integrated.env.windows": {
         "PATH": "${env:CONDA_PREFIX}/Scripts;${env:CONDA_PREFIX};${env:PATH}",
         "PYTHONPATH": "${env:CONDA_PREFIX}/Lib/site-packages",
@@ -132,7 +96,5 @@
     "C_Cpp.default.cStandard": "c17",
     "C_Cpp.default.cppStandard": "c++17",
     "C_Cpp.errorSquiggles": "enabled",
-    "C_Cpp.intelliSenseEngine": "default",
-    "cmake.loggingLevel": "debug",
-    "cmake.useVsDeveloperEnvironment": "never"
+    "C_Cpp.intelliSenseEngine": "default"
 }

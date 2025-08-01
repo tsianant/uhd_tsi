@@ -89,6 +89,18 @@
             "group": "build",
             "detail": "Build only the RFNOC Stream Tool application",
             "problemMatcher": ["$msvc"]
+        },
+        {
+        "label": "CMake: Build RFNOC Stream Tool (Static)",
+        "type":  "shell",
+        "command": "cmake",
+        "args": [
+            "--build", "build-static",
+            "--preset", "windows-static-release"
+        ],
+        "options": { "cwd": "${workspaceFolder}" },
+        "group":  "build",
+        "problemMatcher": ["$msvc"]
         }
     ],
     "version": "2.0.0"

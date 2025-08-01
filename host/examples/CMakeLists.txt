@@ -7,11 +7,16 @@
 
 include(FetchContent)
 
-# Fetch yaml-cpp using FetchContent
+# examples/CMakeLists.txt  (top)
+if(DEFINED ENABLE_STATIC_LIBS AND ENABLE_STATIC_LIBS)
+    # Ensure all FetchContent projects build static
+    set(BUILD_SHARED_LIBS OFF)
+endif()
+
 FetchContent_Declare(
-  yaml-cpp
-  GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-  GIT_TAG 0.8.0 # Can be a tag (yaml-cpp-x.x.x), a commit hash, or a branch name (master)
+    yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG 0.8.0
 )
 FetchContent_MakeAvailable(yaml-cpp)
 

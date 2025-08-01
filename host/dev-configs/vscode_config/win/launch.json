@@ -72,6 +72,17 @@
       "console": "integratedTerminal",
       "stopAtEntry": false,
       "preLaunchTask": "Build (Release)"
+    },
+    {
+      "name": "Debug rfnoc_stream_tool (Static Release)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build-static/Release/rfnoc_stream_tool.exe",
+      "args": ["--help"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "preLaunchTask": "CMake: Build RFNOC Stream Tool (Static)"
     }
   ]
 }
